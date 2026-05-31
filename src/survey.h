@@ -69,8 +69,17 @@ public:
         delay(200);
 
         // NMEA 4.10 GNGSA every 10 s for per-constellation counts
-        // sysID in last field: 1=GPS 2=GLO 3=GAL 4=BDS
         _ser->println("LOG GNGSA ONTIME 10");
+        delay(200);
+
+        // GSV every 10 s — per-satellite azimuth, elevation, SNR for sky plot
+        _ser->println("LOG GPGSV ONTIME 10");
+        delay(200);
+        _ser->println("LOG GLGSV ONTIME 10");
+        delay(200);
+        _ser->println("LOG GAGSV ONTIME 10");
+        delay(200);
+        _ser->println("LOG GBGSV ONTIME 10");
         delay(200);
 
         Serial.printf("[Survey] Started (self-averaging). Min time: %ds, target σ: %.2fm\n",
@@ -83,6 +92,14 @@ public:
             // Only parse BESTPOS when actively collecting
             if (_lineBuf.startsWith("$GNGSA")) {
                 parseGngsa(_lineBuf);
+            } else if (_lineBuf.startsWith("$GPGSV")) {
+                parseGsv(_lineBuf, 1);
+            } else if (_lineBuf.startsWith("$GLGSV")) {
+                parseGsv(_lineBuf, 2);
+            } else if (_lineBuf.startsWith("$GAGSV")) {
+                parseGsv(_lineBuf, 3);
+            } else if (_lineBuf.startsWith("$GBGSV")) {
+                parseGsv(_lineBuf, 4);
             } else if (_state == SurveyState::COLLECTING &&
                        _lineBuf.startsWith("#BESTPOSA")) {
                 parseBestPos(_lineBuf);
@@ -114,6 +131,23 @@ public:
     // -----------------------------------------------------------------------
     // Live data & history (consumed by web UI)
     // -----------------------------------------------------------------------
+    // Individual satellite position (from GSV sentences)
+    struct SatInfo {
+        uint8_t  prn;        // satellite PRN / slot number
+        uint8_t  elevation;  // degrees above horizon (0–90)
+        uint16_t azimuth;    // degrees clockwise from North (0–359)
+        uint8_t  snr;        // signal/noise ratio dBHz (0 = not tracking)
+        uint8_t  system;     // 1=GPS 2=GLO 3=GAL 4=BDS
+    };
+
+    static constexpr int MAX_SATS = 64;
+
+    int getSatellites(SatInfo *out, int maxLen) const {
+        int n = min(_satCount, maxLen);
+        memcpy(out, _satList, n * sizeof(SatInfo));
+        return n;
+    }
+
     struct LiveData {
         double   lat = 0, lon = 0, hgt = 0;   // current running mean
         float    sigma = 0;                    // our computed 3-D σ of the mean
@@ -152,6 +186,16 @@ private:
 
     // Per-constellation counts from GNGSA
     int _svGPS = 0, _svGLO = 0, _svGAL = 0, _svBDS = 0;
+
+    // Per-satellite positions from GSV — rebuilt per constellation each update cycle
+    SatInfo _satList[MAX_SATS];
+    int     _satCount = 0;
+
+    // GSV accumulation buffer (one constellation at a time)
+    SatInfo  _gsvTmp[20];
+    int      _gsvTmpCnt      = 0;
+    int      _gsvTotalMsgs   = 0;
+    uint8_t  _gsvSystem      = 0;
 
     LiveData      _live;
     HistorySample _histBuf[HISTORY_SIZE];
@@ -319,5 +363,60 @@ private:
         _live.svGLO = _svGLO;
         _live.svGAL = _svGAL;
         _live.svBDS = _svBDS;
+    }
+
+    // ------------------------------------------------------------------
+    // NMEA GSV: $G?GSV,numMsgs,msgNum,totalSVs,PRN,elev,azim,snr,...*cs
+    // Called with system: 1=GPS 2=GLO 3=GAL 4=BDS
+    void parseGsv(const String &line, uint8_t system) {
+        // Tokenise (strip checksum first)
+        String s = line;
+        int star = s.lastIndexOf('*');
+        if (star >= 0) s = s.substring(0, star);
+
+        String tok[20];
+        int count = 0, pos = 0;
+        while (pos <= (int)s.length() && count < 20) {
+            int next = s.indexOf(',', pos);
+            if (next < 0) next = s.length();
+            tok[count++] = s.substring(pos, next);
+            pos = next + 1;
+        }
+        if (count < 4) return;
+
+        int numMsgs = tok[1].toInt();
+        int msgNum  = tok[2].toInt();
+        if (numMsgs < 1 || msgNum < 1) return;
+
+        // First sentence of a new constellation batch — reset accumulator
+        if (msgNum == 1 || system != _gsvSystem) {
+            _gsvTmpCnt    = 0;
+            _gsvTotalMsgs = numMsgs;
+            _gsvSystem    = system;
+        }
+
+        // Extract up to 4 satellites from this sentence (fields 4,5,6,7 / 8,9,10,11 ...)
+        for (int i = 4; i + 2 < count && _gsvTmpCnt < 20; i += 4) {
+            int prn  = tok[i].toInt();
+            int elev = tok[i+1].toInt();
+            int azim = tok[i+2].toInt();
+            int snr  = (i+3 < count) ? tok[i+3].toInt() : 0;
+            if (prn == 0) continue;
+            _gsvTmp[_gsvTmpCnt++] = { (uint8_t)prn, (uint8_t)elev,
+                                       (uint16_t)azim, (uint8_t)snr, system };
+        }
+
+        // Last sentence for this constellation — commit to main satellite list
+        if (msgNum == numMsgs) {
+            // Remove old entries for this system, then append fresh ones
+            int out = 0;
+            for (int i = 0; i < _satCount; i++) {
+                if (_satList[i].system != system)
+                    _satList[out++] = _satList[i];
+            }
+            for (int i = 0; i < _gsvTmpCnt && out < MAX_SATS; i++)
+                _satList[out++] = _gsvTmp[i];
+            _satCount = out;
+        }
     }
 };

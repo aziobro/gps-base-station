@@ -41,8 +41,12 @@ void um980Init(HardwareSerial &ser, double lat, double lon, double height) {
     snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1124 ONTIME %d", RTCM_RATE_BDS);
     um980Cmd(ser, cmd);
 
-    // Satellite count feedback on COM2 — keeps the status page updated in base TX mode
+    // Satellite feedback on COM2 — constellation counts + individual azimuth/elevation/SNR
     um980Cmd(ser, "LOG COM2 GNGSA ONTIME 10");
+    um980Cmd(ser, "LOG COM2 GPGSV ONTIME 10");   // GPS satellites in view
+    um980Cmd(ser, "LOG COM2 GLGSV ONTIME 10");   // GLONASS
+    um980Cmd(ser, "LOG COM2 GAGSV ONTIME 10");   // Galileo
+    um980Cmd(ser, "LOG COM2 GBGSV ONTIME 10");   // BeiDou
 
     um980Cmd(ser, "SAVECONFIG");
 

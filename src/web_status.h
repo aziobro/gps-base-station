@@ -46,6 +46,8 @@ public:
             [this]() { handleUpdateUpload(); });
         _server.on("/setup",        HTTP_GET,  [this]() { handleSetupGet(); });
         _server.on("/setup",        HTTP_POST, [this]() { handleSetupPost(); });
+        _server.on("/skyplot",      HTTP_GET,  [this]() { handleSkyplot(); });
+        _server.on("/skyplot/data", HTTP_GET,  [this]() { handleSkyplotData(); });
         _server.onNotFound([this]() { redirectRoot(); });
         _server.begin();
         Serial.println("[Web] Status/config server on port 80.");
@@ -403,6 +405,8 @@ pollSurvey();
         content += "<p style='margin-top:2em;'>"
                    "<a href='/config' style='color:#0d0;'>&#9881; Configuration</a>"
                    "&nbsp;&nbsp;&nbsp;"
+                   "<a href='/skyplot' style='color:#0d0;'>&#9711; Sky Plot</a>"
+                   "&nbsp;&nbsp;&nbsp;"
                    "<a href='/update' style='color:#555;font-size:0.8em;'>Firmware Update (OTA)</a>"
                    "</p>";
 
@@ -717,6 +721,160 @@ pollSurvey();
         }
         json += "}";
         _server.send(200, "application/json", json);
+    }
+
+    // -------------------------------------------------------------------------
+    // Sky plot data JSON  /skyplot/data
+    // -------------------------------------------------------------------------
+    void handleSkyplotData() {
+        if (!checkAuth()) return;
+        SurveyManager::SatInfo sats[SurveyManager::MAX_SATS];
+        int n = _survey.getSatellites(sats, SurveyManager::MAX_SATS);
+        String json = "{\"sats\":[";
+        for (int i = 0; i < n; i++) {
+            if (i) json += ",";
+            json += "{\"prn\":"  + String(sats[i].prn)       +
+                   ",\"el\":"   + String(sats[i].elevation)  +
+                   ",\"az\":"   + String(sats[i].azimuth)    +
+                   ",\"snr\":"  + String(sats[i].snr)        +
+                   ",\"sys\":"  + String(sats[i].system)     + "}";
+        }
+        json += "]}";
+        _server.sendHeader("Cache-Control", "no-cache");
+        _server.send(200, "application/json", json);
+    }
+
+    // -------------------------------------------------------------------------
+    // Sky plot page  /skyplot
+    // -------------------------------------------------------------------------
+    void handleSkyplot() {
+        if (!checkAuth()) return;
+        String html = R"HTML(<!DOCTYPE html><html><head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Sky Plot — GPS Base Station</title>
+<style>
+  body{background:#0a0a0a;color:#ccc;font-family:monospace;margin:0;padding:1em;}
+  h1{color:#0d0;margin-bottom:0.2em;}
+  .back{color:#555;font-size:0.85em;text-decoration:none;}
+  .back:hover{color:#aaa;}
+  #wrap{display:flex;flex-wrap:wrap;gap:1.5em;align-items:flex-start;margin-top:1em;}
+  canvas{background:#0d0d0d;border:1px solid #222;border-radius:50%;}
+  #legend{font-size:0.8em;line-height:2em;}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle;}
+  #info{font-size:0.75em;color:#555;margin-top:0.5em;}
+  #satlist{margin-top:1em;font-size:0.75em;border-collapse:collapse;min-width:260px;}
+  #satlist th{color:#555;text-align:left;padding:2px 8px;}
+  #satlist td{padding:2px 8px;border-bottom:1px solid #1a1a1a;}
+  .g1{color:#00ff41;}.g2{color:#4488ff;}.g3{color:#ff8800;}.g4{color:#ff4444;}
+</style>
+</head><body>
+<a class='back' href='/'>&#8592; Status</a>
+<h1>Sky Plot</h1>
+<div id='wrap'>
+  <canvas id='sky' width='420' height='420'></canvas>
+  <div>
+    <div id='legend'>
+      <div><span class='dot' style='background:#00ff41'></span><span class='g1'>GPS</span></div>
+      <div><span class='dot' style='background:#4488ff'></span><span class='g2'>GLONASS</span></div>
+      <div><span class='dot' style='background:#ff8800'></span><span class='g3'>Galileo</span></div>
+      <div><span class='dot' style='background:#ff4444'></span><span class='g4'>BeiDou</span></div>
+      <div style='margin-top:0.8em;color:#555;font-size:0.9em'>Circle size = SNR<br>Faded = not tracked</div>
+    </div>
+    <table id='satlist'>
+      <tr><th>PRN</th><th>System</th><th>El&deg;</th><th>Az&deg;</th><th>SNR</th></tr>
+    </table>
+    <div id='info'>Updating every 15s</div>
+  </div>
+</div>
+<script>
+var SYS=['','GPS','GLO','GAL','BDS'];
+var COL=['','#00ff41','#4488ff','#ff8800','#ff4444'];
+var SYS_NAME=['','GPS','GLONASS','Galileo','BeiDou'];
+
+function draw(sats){
+  var cv=document.getElementById('sky');
+  var c=cv.getContext('2d');
+  var W=cv.width,H=cv.height,cx=W/2,cy=H/2,R=W/2-24;
+
+  c.clearRect(0,0,W,H);
+
+  // Elevation rings (90=centre, 60, 30, 0=edge)
+  [0,30,60,90].forEach(function(el){
+    var r=R*(1-el/90);
+    c.beginPath();c.arc(cx,cy,r,0,2*Math.PI);
+    c.strokeStyle=el===0?'#333':'#1e1e1e';c.lineWidth=1;c.stroke();
+    if(el<90&&el>0){
+      c.fillStyle='#333';c.font='10px monospace';
+      c.fillText(el+'°',cx+4,cy-r+12);
+    }
+  });
+
+  // Cardinal lines N/S/E/W
+  c.strokeStyle='#222';c.lineWidth=1;
+  c.beginPath();c.moveTo(cx,cy-R);c.lineTo(cx,cy+R);c.stroke();
+  c.beginPath();c.moveTo(cx-R,cy);c.lineTo(cx+R,cy);c.stroke();
+
+  // Cardinal labels
+  c.fillStyle='#444';c.font='bold 11px monospace';c.textAlign='center';
+  c.fillText('N',cx,cy-R-6);
+  c.fillText('S',cx,cy+R+14);
+  c.fillText('E',cx+R+14,cy+4);
+  c.fillText('W',cx-R-8,cy+4);
+
+  // Satellites
+  sats.forEach(function(s){
+    var dist=R*(1-s.el/90);
+    var ang=(s.az-90)*Math.PI/180;
+    var x=cx+dist*Math.cos(ang);
+    var y=cy+dist*Math.sin(ang);
+    var col=COL[s.sys]||'#888';
+    var r=s.snr>0?Math.max(4,Math.min(10,s.snr/8)):4;
+    var alpha=s.snr>0?Math.min(1,0.4+s.snr/60):0.25;
+
+    // Filled circle
+    c.beginPath();c.arc(x,y,r,0,2*Math.PI);
+    c.fillStyle=col;c.globalAlpha=alpha;c.fill();
+    c.globalAlpha=1;
+    c.strokeStyle=col;c.lineWidth=1;c.stroke();
+
+    // PRN label
+    c.fillStyle=s.snr>0?col:'#555';
+    c.font=(s.snr>0?'bold ':'')+'9px monospace';
+    c.textAlign='center';
+    c.fillText(s.prn,x,y-r-2);
+  });
+
+  c.textAlign='left';
+}
+
+function buildTable(sats){
+  var rows='<tr><th>PRN</th><th>System</th><th>El&deg;</th><th>Az&deg;</th><th>SNR</th></tr>';
+  var sorted=sats.slice().sort(function(a,b){return b.snr-a.snr;});
+  sorted.forEach(function(s){
+    var cl='g'+s.sys;
+    var snrBar=s.snr>0?('&#9646;'.repeat(Math.round(s.snr/10))):'—';
+    rows+='<tr class="'+cl+'"><td>'+s.prn+'</td><td>'+SYS_NAME[s.sys]+'</td><td>'+s.el+'</td><td>'+s.az+'</td><td title="'+s.snr+' dBHz">'+snrBar+'</td></tr>';
+  });
+  document.getElementById('satlist').innerHTML=rows;
+}
+
+function refresh(){
+  fetch('/skyplot/data').then(function(r){return r.json();}).then(function(d){
+    draw(d.sats);
+    buildTable(d.sats);
+    document.getElementById('info').textContent=
+      d.sats.length+' satellites — updated '+new Date().toLocaleTimeString();
+  }).catch(function(){
+    document.getElementById('info').textContent='Fetch failed — retrying...';
+  });
+}
+
+refresh();
+setInterval(refresh,15000);
+</script>
+</body></html>)HTML";
+        _server.send(200, "text/html", html);
     }
 
     // -------------------------------------------------------------------------
