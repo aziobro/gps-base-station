@@ -47,6 +47,11 @@ static TxStats rtcmStats, r2gStats, oncStats, rtkStats;
 static unsigned long minTimer = 0;
 static unsigned long hrTimer  = 0;
 
+// Loop rate — counts main-loop iterations per second (Core 1 health indicator)
+static uint32_t loopCount    = 0;
+static uint32_t loopRate     = 0;
+static unsigned long loopTimer = 0;
+
 static uint8_t rtcmBuf[1024];
 
 // ---------------------------------------------------------------------------
@@ -184,7 +189,7 @@ void setup() {
         startSurvey();
     }
 
-    bpsTimer = minTimer = hrTimer = millis();
+    bpsTimer = minTimer = hrTimer = loopTimer = millis();
 }
 
 // ---------------------------------------------------------------------------
@@ -273,5 +278,22 @@ void loop() {
                            r2gStats.lastMin,  r2gStats.lastHr,
                            oncStats.lastMin,  oncStats.lastHr,
                            rtkStats.lastMin,  rtkStats.lastHr);
+    }
+
+    // Loop rate counter (both modes)
+    loopCount++;
+    unsigned long nowL = millis();
+    if (nowL - loopTimer >= 1000) {
+        loopRate  = loopCount;
+        loopCount = 0;
+        loopTimer = nowL;
+        webStatus.setSysStats(
+            ESP.getFreeHeap(),
+            ESP.getMinFreeHeap(),
+            loopRate,
+            rtk2go  ? rtk2go->stackWatermark()  : 0,
+            onocoy  ? onocoy->stackWatermark()   : 0,
+            rtkdata ? rtkdata->stackWatermark()  : 0
+        );
     }
 }

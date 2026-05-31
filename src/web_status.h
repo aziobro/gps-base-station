@@ -65,6 +65,12 @@ public:
     void setRtcmBytesPerSec(uint32_t b) { _rtcmBps = b; }
     void setBaseTxMode(bool baseTx)     { _inBaseTx = baseTx; }
 
+    void setSysStats(uint32_t freeHeap, uint32_t minHeap, uint32_t loopRate,
+                     uint32_t wm_r2g, uint32_t wm_onc, uint32_t wm_rtk) {
+        _freeHeap = freeHeap; _minHeap = minHeap; _loopRate = loopRate;
+        _wm_r2g = wm_r2g; _wm_onc = wm_onc; _wm_rtk = wm_rtk;
+    }
+
     void setStats(uint32_t rtcmMin, uint32_t rtcmHr,
                   uint32_t r2gMin,  uint32_t r2gHr,
                   uint32_t oncMin,  uint32_t oncHr,
@@ -94,6 +100,8 @@ private:
     uint32_t _r2gMin  = 0, _r2gHr  = 0;
     uint32_t _oncMin  = 0, _oncHr  = 0;
     uint32_t _rtkMin  = 0, _rtkHr  = 0;
+    uint32_t _freeHeap = 0, _minHeap = 0, _loopRate = 0;
+    uint32_t _wm_r2g = 0, _wm_onc = 0, _wm_rtk = 0;
 
     static constexpr const char *ADMIN_USER = "admin";
 
@@ -226,6 +234,21 @@ private:
             content += rowId("st-rssi", "WiFi signal",
                              rssiHtml + " &nbsp;<small style='opacity:.6'>" + ssid + "</small>");
         }
+        {
+            uint32_t total = ESP.getHeapSize();
+            uint8_t  pct   = total ? (uint8_t)(100 - (_freeHeap * 100UL / total)) : 0;
+            String heapClass = pct < 60 ? "ok" : pct < 80 ? "warn" : "err";
+            String heapHtml  = "<span class='" + heapClass + "'>" +
+                               fmtBytes(_freeHeap) + " free (" + String(pct) + "% used)</span>" +
+                               " <span style='opacity:.55'>low watermark " + fmtBytes(_minHeap) + "</span>";
+            content += rowId("st-heap", "Heap memory", heapHtml);
+
+            String loopHtml = String(_loopRate) + " iter/s";
+            String wmHtml   = "<span style='opacity:.55'>stack: RTK2go " + fmtBytes(_wm_r2g) +
+                              " | Onocoy " + fmtBytes(_wm_onc) +
+                              " | RTKdata " + fmtBytes(_wm_rtk) + "</span>";
+            content += rowId("st-cpu", "Loop rate", loopHtml + " &nbsp;" + wmHtml);
+        }
         content += "</table>";
 
         // JS: poll /status every 10 s and patch only the status cells — form is untouched
@@ -246,6 +269,9 @@ function stPoll(){
     set('st-pos',  d.pos_valid?"<span class='ok'>valid</span>":"<span class='warn'>none</span>");
     var r=parseInt(d.rssi),rc=r>=-60?"ok":r>=-70?"ok":r>=-80?"warn":"err",rl=r>=-60?"excellent":r>=-70?"good":r>=-80?"fair":"weak";
     set('st-rssi',"<span class='"+rc+"'>"+r+" dBm ("+rl+")</span> <small style='opacity:.6'>"+d.ssid+"</small>");
+    var hp=Math.round(100-d.free_heap*100/d.heap_total),hc=hp<60?"ok":hp<80?"warn":"err";
+    set('st-heap',"<span class='"+hc+"'>"+fb(d.free_heap)+" free ("+hp+"% used)</span> <span style='opacity:.55'>low watermark "+fb(d.min_heap)+"</span>");
+    set('st-cpu',d.loop_rate+" iter/s &nbsp;<span style='opacity:.55'>stack: RTK2go "+fb(d.wm_r2g)+" | Onocoy "+fb(d.wm_onc)+" | RTKdata "+fb(d.wm_rtk)+"</span>");
   }).catch(function(){});
   setTimeout(stPoll, 10000);
 }
@@ -664,6 +690,13 @@ pollSurvey();
         json += ",\"rtk_hr\":"      + String(_rtkHr);
         json += ",\"rssi\":"        + String(WiFi.RSSI());
         json += ",\"ssid\":"        + jsonStr(WiFi.SSID());
+        json += ",\"free_heap\":"   + String(_freeHeap);
+        json += ",\"min_heap\":"    + String(_minHeap);
+        json += ",\"heap_total\":"  + String(ESP.getHeapSize());
+        json += ",\"loop_rate\":"   + String(_loopRate);
+        json += ",\"wm_r2g\":"      + String(_wm_r2g);
+        json += ",\"wm_onc\":"      + String(_wm_onc);
+        json += ",\"wm_rtk\":"      + String(_wm_rtk);
         json += ",\"pos_valid\":"   + String(pos.valid ? "true" : "false");
         json += "}";
         _server.sendHeader("Cache-Control", "no-cache");

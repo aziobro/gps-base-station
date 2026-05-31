@@ -80,6 +80,12 @@ public:
     uint32_t bytesSent()      const { return _bytesSent; }
     void     clearBytesSent()       { _bytesSent = 0; }
 
+    // Stack headroom in bytes — low values (<512) indicate risk of stack overflow
+    uint32_t stackWatermark() const {
+        if (!_taskHandle) return 0;
+        return uxTaskGetStackHighWaterMark(_taskHandle) * sizeof(StackType_t);
+    }
+
 private:
     const char   *_host;
     uint16_t      _port;
