@@ -29,13 +29,20 @@ public:
         uint16_t len;
     };
 
+    struct StatusSnapshot {
+        bool connected;
+        String status;
+    };
+
     NtripPushClient(const char *host, uint16_t port,
                     const char *mountpoint, const char *password,
                     const char *label, Protocol proto = Protocol::V1)
         : _host(host), _port(port),
           _mountpoint(mountpoint), _password(password),
           _label(label), _proto(proto),
-          _configured(mountpoint && mountpoint[0] != '\0') {}
+          _configured(mountpoint && mountpoint[0] != '\0') {
+        _lastStatus = _configured ? "starting" : "disabled";
+    }
 
     // Call once after WiFi is up — creates the queue and starts the task on Core 0
     bool startTask() {
@@ -59,6 +66,9 @@ public:
     // TCP stream after silently dropping arbitrary RTCM bytes.
     void push(const uint8_t *data, size_t len) {
         if (!_queue || _suspended || _reconnect || !_configured || len == 0) return;
+        // RTCM is real-time data. Do not build a stale backlog while DNS,
+        // TCP, or NTRIP handshakes are still in progress.
+        if (!connected()) return;
         Packet pkt;
         pkt.len = (uint16_t)min(len, (size_t)MAX_PKT_BYTES);
         memcpy(pkt.data, data, pkt.len);
@@ -78,7 +88,7 @@ public:
 
     // Suspend sending and wait until the worker has closed the socket.
     void requestSuspend() {
-        _suspendAck = false;
+        _suspendAck = _taskHandle == nullptr;
         _suspended = true;
     }
 
@@ -107,6 +117,13 @@ public:
     String lastStatus() const {
         lock();
         String value = _lastStatus;
+        unlock();
+        return value;
+    }
+
+    StatusSnapshot snapshot() const {
+        lock();
+        StatusSnapshot value{_connected, _lastStatus};
         unlock();
         return value;
     }

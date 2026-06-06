@@ -1,6 +1,6 @@
 #pragma once
 
-#define FIRMWARE_VERSION "2026.06.06-review1"
+#define FIRMWARE_VERSION "2026.06.06-review3"
 
 // Copy secrets.example.h to secrets.h for optional compile-time defaults.
 // Runtime values saved through the web UI take precedence.

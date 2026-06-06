@@ -53,6 +53,9 @@ static uint32_t loopRate     = 0;
 static unsigned long loopTimer = 0;
 
 static uint8_t rtcmBuf[1024];
+static size_t rtcmLen = 0;
+static unsigned long rtcmBatchStarted = 0;
+static constexpr unsigned long RTCM_BATCH_MS = 200;
 
 // ---------------------------------------------------------------------------
 // WiFi watchdog — non-blocking, called every loop iteration
@@ -89,8 +92,10 @@ void startBaseTx(double lat, double lon, double height) {
 
     survey.reset();
     while (dataSerial.available()) dataSerial.read();
+    rtcmLen = 0;
 
     mode = Mode::BASE_TX;
+    webStatus.setBaseTxMode(true);
     um980Init(cmdSerial, lat, lon, height);
     if (rtk2go)  rtk2go->resume();
     if (onocoy)  onocoy->resume();
@@ -101,6 +106,7 @@ void startBaseTx(double lat, double lon, double height) {
 
 void startSurvey() {
     mode = Mode::SURVEY;
+    webStatus.setBaseTxMode(false);
     storage.clearPosition();
     // Wait for every worker to close before collecting a new base position.
     if (rtk2go)  rtk2go->suspendAndWait();
@@ -108,6 +114,7 @@ void startSurvey() {
     if (rtkdata) rtkdata->suspendAndWait();
     survey.start(cmdSerial);
     while (dataSerial.available()) dataSerial.read();
+    rtcmLen = 0;
     Serial.printf("[Survey] Monitoring page: http://%s/\n",
                   WiFi.localIP().toString().c_str());
 }
@@ -157,28 +164,31 @@ void setup() {
     bool r2gEnabled = storage.serviceEnabled("rtk2go");
     bool oncEnabled = storage.serviceEnabled("onocoy");
     bool rtkEnabled = storage.serviceEnabled("rtkdata");
+    bool r2gActive = r2gEnabled && r2g.mountpoint.length() > 0;
+    bool oncActive = oncEnabled && onc.mountpoint.length() > 0;
+    bool rtkActive = rtkEnabled && rtk.mountpoint.length() > 0;
     Serial.printf("[Main] RTK2go: %s  Onocoy: %s  RTKdata: %s\n",
                   r2gEnabled ? "enabled" : "disabled",
                   oncEnabled ? "enabled" : "disabled",
                   rtkEnabled ? "enabled" : "disabled");
 
     rtk2go  = new NtripPushClient(RTK2GO_HOST,  RTK2GO_PORT,
-                                   r2gEnabled ? r2g.mountpoint.c_str() : "",
-                                   r2gEnabled ? r2g.password.c_str()   : "",
+                                   r2gActive ? r2g.mountpoint.c_str() : "",
+                                   r2gActive ? r2g.password.c_str()   : "",
                                    "RTK2go", NtripPushClient::Protocol::V1);
     onocoy  = new NtripPushClient(ONOCOY_HOST,  ONOCOY_PORT,
-                                   oncEnabled ? onc.mountpoint.c_str() : "",
-                                   oncEnabled ? onc.password.c_str()   : "",
+                                   oncActive ? onc.mountpoint.c_str() : "",
+                                   oncActive ? onc.password.c_str()   : "",
                                    "Onocoy", NtripPushClient::Protocol::V2);
     rtkdata = new NtripPushClient(RTKDATA_HOST, RTKDATA_PORT,
-                                   rtkEnabled ? rtk.mountpoint.c_str() : "",
-                                   rtkEnabled ? rtk.password.c_str()   : "",
+                                   rtkActive ? rtk.mountpoint.c_str() : "",
+                                   rtkActive ? rtk.password.c_str()   : "",
                                    "RTKdata", NtripPushClient::Protocol::V1);
 
     // Each client runs on its own FreeRTOS task on Core 0 — non-blocking from main loop
-    bool r2gTaskOk = rtk2go->startTask();
-    bool oncTaskOk = onocoy->startTask();
-    bool rtkTaskOk = rtkdata->startTask();
+    bool r2gTaskOk = !r2gActive || rtk2go->startTask();
+    bool oncTaskOk = !oncActive || onocoy->startTask();
+    bool rtkTaskOk = !rtkActive || rtkdata->startTask();
     if (!r2gTaskOk || !oncTaskOk || !rtkTaskOk) {
         Serial.println("[Main] One or more NTRIP tasks failed to start.");
     }
@@ -202,6 +212,13 @@ void setup() {
         if (onocoy)  onocoy->requestSuspend();
         if (rtkdata) rtkdata->requestSuspend();
         delay(250);
+    });
+    webStatus.onOtaFinished([](bool success) {
+        if (success) return;
+        Serial.println("[Main] OTA failed - resuming upstream NTRIP streams.");
+        if (rtk2go)  rtk2go->resume();
+        if (onocoy)  onocoy->resume();
+        if (rtkdata) rtkdata->resume();
     });
 
     BasePosition stored = storage.loadPosition();
@@ -245,17 +262,21 @@ void loop() {
             survey.feed((uint8_t)cmdSerial.read());
         }
 
-        size_t len = 0;
-        while (dataSerial.available() && len < sizeof(rtcmBuf)) {
-            rtcmBuf[len++] = (uint8_t)dataSerial.read();
+        while (dataSerial.available() && rtcmLen < sizeof(rtcmBuf)) {
+            if (rtcmLen == 0) rtcmBatchStarted = millis();
+            rtcmBuf[rtcmLen++] = (uint8_t)dataSerial.read();
         }
 
-        if (len > 0) {
-            localCaster.update(rtcmBuf, len);
-            rtk2go->push(rtcmBuf, len);
-            onocoy->push(rtcmBuf, len);
-            rtkdata->push(rtcmBuf, len);
-            rtcmByteCount += len;
+        size_t flushedLen = 0;
+        if (rtcmLen == sizeof(rtcmBuf) ||
+            (rtcmLen > 0 && millis() - rtcmBatchStarted >= RTCM_BATCH_MS)) {
+            flushedLen = rtcmLen;
+            localCaster.update(rtcmBuf, rtcmLen);
+            rtk2go->push(rtcmBuf, rtcmLen);
+            onocoy->push(rtcmBuf, rtcmLen);
+            rtkdata->push(rtcmBuf, rtcmLen);
+            rtcmByteCount += rtcmLen;
+            rtcmLen = 0;
         }
 
         // Drain per-provider byte counters into rolling accumulators
@@ -265,7 +286,7 @@ void loop() {
         r2gStats.accumMin += r2gB; r2gStats.accumHr += r2gB;
         oncStats.accumMin += oncB; oncStats.accumHr += oncB;
         rtkStats.accumMin += rtkB; rtkStats.accumHr += rtkB;
-        rtcmStats.accumMin += len; rtcmStats.accumHr += len;
+        rtcmStats.accumMin += flushedLen; rtcmStats.accumHr += flushedLen;
 
         unsigned long now = millis();
 
@@ -291,14 +312,16 @@ void loop() {
             hrTimer = now;
         }
 
-        webStatus.setBaseTxMode(true);
         webStatus.setNtripLocalClients(localCaster.clientCount());
-        webStatus.setRtk2goConnected(rtk2go->connected());
-        webStatus.setRtk2goStatus(rtk2go->lastStatus());
-        webStatus.setOnocoyConnected(onocoy->connected());
-        webStatus.setOnocoyStatus(onocoy->lastStatus());
-        webStatus.setRtkdataConnected(rtkdata->connected());
-        webStatus.setRtkdataStatus(rtkdata->lastStatus());
+        auto r2gState = rtk2go->snapshot();
+        auto oncState = onocoy->snapshot();
+        auto rtkState = rtkdata->snapshot();
+        webStatus.setRtk2goConnected(r2gState.connected);
+        webStatus.setRtk2goStatus(r2gState.status);
+        webStatus.setOnocoyConnected(oncState.connected);
+        webStatus.setOnocoyStatus(oncState.status);
+        webStatus.setRtkdataConnected(rtkState.connected);
+        webStatus.setRtkdataStatus(rtkState.status);
         webStatus.setRtcmBytesPerSec(rtcmBps);
         webStatus.setStats(rtcmStats.lastMin, rtcmStats.lastHr,
                            r2gStats.lastMin,  r2gStats.lastHr,

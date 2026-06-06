@@ -7,6 +7,7 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 - **Automated survey-in** — self-averaging position using Welford's algorithm (σ decreases as 1/√N)
 - **Multi-constellation RTCM3** — GPS (1074), GLONASS (1084), Galileo (1094), BeiDou (1124) + base position (1005)
 - **Three simultaneous NTRIP push destinations** — RTK2go, Onocoy, RTKdata.online (each independently reconnecting via FreeRTOS task)
+- **Real-time stream buffering** — RTCM is batched into short 200 ms chunks; stale corrections are not queued while a provider reconnects
 - **Local NTRIP caster** — port 2101, up to 4 simultaneous rover clients on the local network
 - **Web status page** — live satellite counts, RTCM throughput (B/s, KB/min, MB/hr), per-service stats, WiFi signal strength
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
@@ -228,6 +229,10 @@ UM980 COM3 ────────►│ Serial2 (DATA)  ──► localCaster 
 ```
 
 Each NTRIP push client runs on its own FreeRTOS task (Core 0). The main Arduino loop (Core 1) enqueues RTCM packets non-blocking via a 12-packet queue per service. TCP connect, reconnect, and backoff logic runs entirely in the background.
+
+Disabled or unconfigured providers do not allocate a task or queue. During OTA,
+active provider streams are suspended before flash writes begin; a failed OTA
+automatically resumes them.
 
 ---
 

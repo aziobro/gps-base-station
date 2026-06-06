@@ -59,6 +59,7 @@ public:
     void onSurveyRequested(std::function<void()> cb) { _surveyCallback = cb; }
     void onPositionSet(std::function<void(double,double,double)> cb) { _posCallback = cb; }
     void onOtaStart(std::function<void()> cb) { _otaStartCallback = cb; }
+    void onOtaFinished(std::function<void(bool)> cb) { _otaFinishedCallback = cb; }
 
     void setNtripLocalClients(int n)    { _ntripLocalClients = n; }
     void setRtk2goConnected(bool b)        { _rtk2goOk = b; }
@@ -93,6 +94,7 @@ private:
     std::function<void()> _surveyCallback;
     std::function<void(double,double,double)> _posCallback;
     std::function<void()> _otaStartCallback;
+    std::function<void(bool)> _otaFinishedCallback;
 
     int      _ntripLocalClients = 0;
     bool     _rtk2goOk  = false;
@@ -197,6 +199,7 @@ private:
 
         // --- Status table (cells have IDs so JS can update them without page reload) ---
         String content = "<h2>Status</h2><table>";
+        content += rowId("st-fw",      "Firmware",            FIRMWARE_VERSION);
         content += rowId("st-mode",    "Mode",                _inBaseTx ? "<span class='ok'>Base TX</span>" : "<span class='warn'>Survey-in</span>");
         content += rowId("st-pos",     "Stored position",     pos.valid ? "<span class='ok'>valid</span>" : "<span class='warn'>none</span>");
         if (pos.valid) {
@@ -263,12 +266,13 @@ private:
 function stPoll(){
   fetch('/status').then(function(r){return r.json();}).then(function(d){
     function set(id,html){var e=document.getElementById(id);if(e)e.innerHTML=html;}
+    set('st-fw',      d.firmware);
     set('st-mode',    d.base_tx?"<span class='ok'>Base TX</span>":"<span class='warn'>Survey-in</span>");
     set('st-clients', d.clients);
     var svT=d.sv_gps+d.sv_glo+d.sv_gal+d.sv_bds;
     set('st-svs',"<span style='opacity:.7'>GPS:</span> "+d.sv_gps+" &nbsp;<span style='opacity:.7'>GLO:</span> "+d.sv_glo+" &nbsp;<span style='opacity:.7'>GAL:</span> "+d.sv_gal+" &nbsp;<span style='opacity:.7'>BDS:</span> "+d.sv_bds+" &nbsp;<span style='opacity:.55'>| total "+svT+"</span>");
     function fb(b){return b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?(b/1024).toFixed(1)+' KB':b+' B';}
-    function svc(ok,st,mn,hr){var s=ok?"<span class='ok'>connected</span>":"<span class='err'>"+st+"</span>";if(ok||mn>0||hr>0)s+=" <span style='opacity:.55'>| "+fb(mn)+"/min | "+fb(hr)+"/hr</span>";return s;}
+    function svc(ok,st,mn,hr){var c=st==='disabled'?'warn':'err';var s=ok?"<span class='ok'>connected</span>":"<span class='"+c+"'>"+st+"</span>";if(ok||mn>0||hr>0)s+=" <span style='opacity:.55'>| "+fb(mn)+"/min | "+fb(hr)+"/hr</span>";return s;}
     set('st-r2g', svc(d.rtk2go,  d.rtk2go_st,  d.r2g_min, d.r2g_hr));
     set('st-onc', svc(d.onocoy,  d.onocoy_st,  d.onc_min, d.onc_hr));
     set('st-rtk', svc(d.rtkdata, d.rtkdata_st, d.rtk_min, d.rtk_hr));
@@ -684,11 +688,13 @@ pollSurvey();
     void handleUpdateComplete() {
         if (!checkAuth()) return;
         if (_updateError) {
+            if (_otaFinishedCallback) _otaFinishedCallback(false);
             _server.send(500, "text/html", page("OTA Failed",
                 "<h2>Update Failed</h2>"
                 "<p class='err'>" + String(Update.errorString()) + "</p>"
                 "<p><a href='/update'>Try again</a></p>"));
         } else {
+            if (_otaFinishedCallback) _otaFinishedCallback(true);
             _server.send(200, "text/html", page("OTA Success",
                 "<h2>Update Successful</h2>"
                 "<p class='ok'>Firmware flashed. Device is restarting&hellip;</p>"
@@ -1020,7 +1026,10 @@ setInterval(refresh,15000);
                                     uint32_t perMin, uint32_t perHr) {
         String s;
         if (ok) s = "<span class='ok'>connected</span>";
-        else    s = "<span class='err'>" + status + "</span>";
+        else if (status == "disabled")
+            s = "<span class='warn'>disabled</span>";
+        else
+            s = "<span class='err'>" + status + "</span>";
         if (ok || perMin > 0 || perHr > 0) {
             s += " <span style='opacity:.55'>| " + fmtBytes(perMin) + "/min";
             s += " | " + fmtBytes(perHr) + "/hr</span>";
