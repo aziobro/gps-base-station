@@ -1,10 +1,22 @@
 #pragma once
 
+#define FIRMWARE_VERSION "2026.06.06-review1"
+
+// Copy secrets.example.h to secrets.h for optional compile-time defaults.
+// Runtime values saved through the web UI take precedence.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
 // =============================================================================
 // WiFi
 // =============================================================================
-#define WIFI_SSID     "WeAreOnThePath!"
-#define WIFI_PASSWORD "itfloats"
+#ifndef WIFI_SSID
+#define WIFI_SSID     ""
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD ""
+#endif
 
 // =============================================================================
 // Local NTRIP Caster  (rovers on the same network connect here)
@@ -16,26 +28,38 @@
 // =============================================================================
 // RTK2go  — register your mountpoint at rtk2go.com first
 // =============================================================================
-#define RTK2GO_HOST       "ntrip.rtk2go.com"
+#define RTK2GO_HOST       "rtk2go.com"
 #define RTK2GO_PORT       2101
-#define RTK2GO_MOUNTPOINT "YOUR_RTK2GO_MOUNTPOINT"
-#define RTK2GO_PASSWORD   "YOUR_RTK2GO_PASSWORD"
+#ifndef RTK2GO_MOUNTPOINT
+#define RTK2GO_MOUNTPOINT ""
+#endif
+#ifndef RTK2GO_PASSWORD
+#define RTK2GO_PASSWORD   ""
+#endif
 
 // =============================================================================
 // Onocoy  — register your mountpoint at console.onocoy.com first
 // =============================================================================
 #define ONOCOY_HOST       "servers.onocoy.com"
 #define ONOCOY_PORT       2101
-#define ONOCOY_MOUNTPOINT "YOUR_ONOCOY_MOUNTPOINT"
-#define ONOCOY_PASSWORD   "YOUR_ONOCOY_PASSWORD"
+#ifndef ONOCOY_MOUNTPOINT
+#define ONOCOY_MOUNTPOINT ""
+#endif
+#ifndef ONOCOY_PASSWORD
+#define ONOCOY_PASSWORD   ""
+#endif
 
 // =============================================================================
 // RTKdata.online  — register at rtkdata.online, uses NTRIP v1
 // =============================================================================
 #define RTKDATA_HOST       "rtkdata.online"
 #define RTKDATA_PORT       2101
-#define RTKDATA_MOUNTPOINT "YOUR_RTKDATA_MOUNTPOINT"
-#define RTKDATA_PASSWORD   "YOUR_RTKDATA_PASSWORD"
+#ifndef RTKDATA_MOUNTPOINT
+#define RTKDATA_MOUNTPOINT ""
+#endif
+#ifndef RTKDATA_PASSWORD
+#define RTKDATA_PASSWORD   ""
+#endif
 
 // =============================================================================
 // Survey-in

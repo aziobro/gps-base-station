@@ -13,3 +13,6 @@
 
 # Claude Code session data
 .claude/
+
+# Local credentials
+src/secrets.h

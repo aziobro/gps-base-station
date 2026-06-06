@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <errno.h>
+#include <math.h>
 #include "survey.h"
 #include "storage.h"
 
@@ -13,7 +15,8 @@
 //   All other routes redirect to /setup
 //
 // Normal operation (password is set — all routes require HTTP Basic Auth):
-//   GET  /           — status + config page
+//   GET  /           — status page
+//   GET  /config     — service and position configuration
 //   POST /config     — save RTK2go / Onocoy credentials, restart
 //   POST /survey     — start new survey-in
 //   GET  /position   — current position as JSON
@@ -24,12 +27,9 @@ public:
         : _survey(survey), _storage(storage), _server(80) {}
 
     void begin() {
-        // Cache the admin password so checkAuth() doesn't need to call back into Storage
-        // on every request.  Stays valid until the device restarts after a password change.
+        // Cache the admin password so checkAuth() does not read NVS on every
+        // request. A password change restarts the device.
         if (_storage.isAdminPasswordSet()) {
-            // Storage doesn't expose a getter, so we use a known-correct password
-            // to bootstrap: re-check is done via authenticate() anyway.
-            // We need the plaintext — add a thin accessor to Storage.
             _cachedAdminPw = _storage.getAdminPassword();
         }
 
@@ -46,8 +46,9 @@ public:
             [this]() { handleUpdateUpload(); });
         _server.on("/setup",        HTTP_GET,  [this]() { handleSetupGet(); });
         _server.on("/setup",        HTTP_POST, [this]() { handleSetupPost(); });
-        _server.on("/skyplot",      HTTP_GET,  [this]() { handleSkyplot(); });
-        _server.on("/skyplot/data", HTTP_GET,  [this]() { handleSkyplotData(); });
+        _server.on("/skyplot",         HTTP_GET,  [this]() { handleSkyplot(); });
+        _server.on("/skyplot/data",    HTTP_GET,  [this]() { handleSkyplotData(); });
+        _server.on("/config/position", HTTP_POST, [this]() { handleSetPosition(); });
         _server.onNotFound([this]() { redirectRoot(); });
         _server.begin();
         Serial.println("[Web] Status/config server on port 80.");
@@ -56,6 +57,8 @@ public:
     void update() { _server.handleClient(); }
 
     void onSurveyRequested(std::function<void()> cb) { _surveyCallback = cb; }
+    void onPositionSet(std::function<void(double,double,double)> cb) { _posCallback = cb; }
+    void onOtaStart(std::function<void()> cb) { _otaStartCallback = cb; }
 
     void setNtripLocalClients(int n)    { _ntripLocalClients = n; }
     void setRtk2goConnected(bool b)        { _rtk2goOk = b; }
@@ -88,6 +91,8 @@ private:
     Storage       &_storage;
     WebServer      _server;
     std::function<void()> _surveyCallback;
+    std::function<void(double,double,double)> _posCallback;
+    std::function<void()> _otaStartCallback;
 
     int      _ntripLocalClients = 0;
     bool     _rtk2goOk  = false;
@@ -422,6 +427,7 @@ pollSurvey();
         ServiceCreds r2g  = _storage.loadCreds("rtk2go");
         ServiceCreds onc  = _storage.loadCreds("onocoy");
         ServiceCreds rtkd = _storage.loadCreds("rtkdata");
+        BasePosition pos = _storage.loadPosition();
 
         String content = "<p><a href='/' style='color:#555;font-size:0.85em'>&larr; Status</a></p>"
                          "<h2>Service Configuration</h2>"
@@ -450,6 +456,21 @@ pollSurvey();
                          + pwInput("admin_pw2", "admin_pw2_set", "") + "</label><br><br>"
 
                          "<button type='submit'>Save &amp; Restart</button>"
+                         "</form>"
+
+                         "<hr style='border:none;border-top:1px solid #333;margin:2em 0'>"
+                         "<h2>Manual Base Position</h2>"
+                         "<p style='color:#aaa;font-size:0.85em'>Override the stored position directly."
+                         " The device will switch to Base TX mode immediately — no survey required."
+                         " Leave all three fields blank to clear the stored position and force a new survey.</p>"
+                         "<form method='POST' action='/config/position'>"
+                         "<label>Latitude (decimal degrees)<br>" +
+                         textInput("pos_lat", pos.valid ? String(pos.lat, 8) : "") + "</label><br><br>"
+                         "<label>Longitude (decimal degrees)<br>" +
+                         textInput("pos_lon", pos.valid ? String(pos.lon, 8) : "") + "</label><br><br>"
+                         "<label>Ellipsoidal Height (metres)<br>" +
+                         textInput("pos_hgt", pos.valid ? String(pos.height, 4) : "") + "</label><br><br>"
+                         "<button type='submit'>Set Position</button>"
                          "</form>";
 
         _server.send(200, "text/html", page("Configuration", content));
@@ -476,6 +497,24 @@ pollSurvey();
         String adminPw    = _server.arg("admin_pw");
         String adminPw2   = _server.arg("admin_pw2");
 
+        // Validate the complete form before changing any NVS values.
+        if (adminPw.length() > 0) {
+            if (adminPw != adminPw2) {
+                String html = page("Config Error",
+                    "<h2>Error</h2><p class='err'>Admin passwords did not match.</p>"
+                    "<p><a href='/config'>Go back</a></p>");
+                _server.send(400, "text/html", html);
+                return;
+            }
+            if (adminPw.length() < 6) {
+                String html = page("Config Error",
+                    "<h2>Error</h2><p class='err'>Password must be at least 6 characters.</p>"
+                    "<p><a href='/config'>Go back</a></p>");
+                _server.send(400, "text/html", html);
+                return;
+            }
+        }
+
         _storage.setServiceEnabled("rtk2go",  r2gEnabled);
         _storage.setServiceEnabled("onocoy",  oncEnabled);
         _storage.setServiceEnabled("rtkdata", rtkEnabled);
@@ -501,20 +540,6 @@ pollSurvey();
         }
 
         if (adminPw.length() > 0) {
-            if (adminPw != adminPw2) {
-                String html = page("Config Error",
-                    "<h2>Error</h2><p class='err'>Admin passwords did not match.</p>"
-                    "<p><a href='/config'>Go back</a></p>");
-                _server.send(400, "text/html", html);
-                return;
-            }
-            if (adminPw.length() < 6) {
-                String html = page("Config Error",
-                    "<h2>Error</h2><p class='err'>Password must be at least 6 characters.</p>"
-                    "<p><a href='/config'>Go back</a></p>");
-                _server.send(400, "text/html", html);
-                return;
-            }
             _storage.setAdminPassword(adminPw);
         }
 
@@ -535,6 +560,67 @@ pollSurvey();
         if (_surveyCallback) _surveyCallback();
         _server.sendHeader("Location", "/");
         _server.send(303);
+    }
+
+    // -------------------------------------------------------------------------
+    // Set manual base position
+    // -------------------------------------------------------------------------
+    void handleSetPosition() {
+        if (!checkAuth()) return;
+
+        String latStr = _server.arg("pos_lat");
+        String lonStr = _server.arg("pos_lon");
+        String hgtStr = _server.arg("pos_hgt");
+
+        // All blank → clear position and trigger survey
+        if (latStr.length() == 0 && lonStr.length() == 0 && hgtStr.length() == 0) {
+            _storage.clearPosition();
+            _server.send(200, "text/html", page("Position Cleared",
+                "<h2>Position Cleared</h2>"
+                "<p>Stored position removed. A new survey-in will begin.</p>"
+                "<script>setTimeout(()=>location.href='/',3000)</script>"));
+            delay(500);
+            if (_surveyCallback) _surveyCallback();
+            return;
+        }
+
+        if (latStr.length() == 0 || lonStr.length() == 0 || hgtStr.length() == 0) {
+            _server.send(400, "text/html", page("Input Error",
+                "<h2>Error</h2><p class='err'>All three fields are required (or leave all blank to clear).</p>"
+                "<p><a href='/config'>Go back</a></p>"));
+            return;
+        }
+
+        double lat = 0;
+        double lon = 0;
+        double hgt = 0;
+        if (!parseFiniteDouble(latStr, lat) ||
+            !parseFiniteDouble(lonStr, lon) ||
+            !parseFiniteDouble(hgtStr, hgt)) {
+            _server.send(400, "text/html", page("Input Error",
+                "<h2>Error</h2><p class='err'>Coordinates must be valid numeric values.</p>"
+                "<p><a href='/config'>Go back</a></p>"));
+            return;
+        }
+
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180 ||
+            hgt < -1000 || hgt > 20000) {
+            _server.send(400, "text/html", page("Input Error",
+                "<h2>Error</h2><p class='err'>Latitude must be -90..90, longitude "
+                "-180..180, and height -1000..20000 metres.</p>"
+                "<p><a href='/config'>Go back</a></p>"));
+            return;
+        }
+
+        _storage.savePosition(lat, lon, hgt);
+
+        _server.send(200, "text/html", page("Position Set",
+            "<h2>Position Set</h2>"
+            "<p>Switching to Base TX mode with the new position.</p>"
+            "<script>setTimeout(()=>location.href='/',4000)</script>"));
+
+        delay(500);
+        if (_posCallback) _posCallback(lat, lon, hgt);
     }
 
     // -------------------------------------------------------------------------
@@ -566,6 +652,7 @@ pollSurvey();
 
         if (upload.status == UPLOAD_FILE_START) {
             _updateError = false;
+            if (_otaStartCallback) _otaStartCallback();
             Serial.printf("[OTA] Receiving: %s (%u bytes expected)\n",
                           upload.filename.c_str(), upload.totalSize);
             if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
@@ -662,13 +749,13 @@ pollSurvey();
     void handleStatus() {
         if (!checkAuth()) return;
         BasePosition pos = _storage.loadPosition();
-        String json = "{";
+        String json = "{\"firmware\":\"" + String(FIRMWARE_VERSION) + "\"";
         auto jsonStr = [](const String &s) -> String {
             String out = "\"";
             for (char c : s) { if (c=='"') out+="\\\""; else out+=c; }
             return out + "\"";
         };
-        json += "\"base_tx\":"      + String(_inBaseTx ? "true" : "false");
+        json += ",\"base_tx\":"     + String(_inBaseTx ? "true" : "false");
         json += ",\"rtk2go\":"      + String(_rtk2goOk ? "true" : "false");
         json += ",\"rtk2go_st\":"   + jsonStr(_rtk2goOk ? "connected" : _rtk2goStatus);
         json += ",\"onocoy\":"      + String(_onocoyOk ? "true" : "false");
@@ -942,7 +1029,26 @@ setInterval(refresh,15000);
     }
 
     String textInput(const String &name, const String &value) {
-        return "<input type='text' name='" + name + "' value='" + value + "'>";
+        return "<input type='text' name='" + htmlEscape(name) +
+               "' value='" + htmlEscape(value) + "'>";
+    }
+
+    static bool parseFiniteDouble(String value, double &result) {
+        value.trim();
+        if (value.length() == 0) return false;
+        errno = 0;
+        char *end = nullptr;
+        result = strtod(value.c_str(), &end);
+        return errno == 0 && end != value.c_str() && *end == '\0' && isfinite(result);
+    }
+
+    static String htmlEscape(String value) {
+        value.replace("&", "&amp;");
+        value.replace("\"", "&quot;");
+        value.replace("<", "&lt;");
+        value.replace(">", "&gt;");
+        value.replace("'", "&#39;");
+        return value;
     }
 
     // changedFlag is a hidden field name that JS sets to "1" when user edits the field

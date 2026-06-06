@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 
 // Pushes RTCM3 data to an upstream NTRIP caster (RTK2go, Onocoy, etc.)
 //
@@ -33,52 +34,90 @@ public:
                     const char *label, Protocol proto = Protocol::V1)
         : _host(host), _port(port),
           _mountpoint(mountpoint), _password(password),
-          _label(label), _proto(proto) {}
+          _label(label), _proto(proto),
+          _configured(mountpoint && mountpoint[0] != '\0') {}
 
     // Call once after WiFi is up — creates the queue and starts the task on Core 0
-    void startTask() {
+    bool startTask() {
+        _mutex = xSemaphoreCreateMutex();
         _queue = xQueueCreate(QUEUE_DEPTH, sizeof(Packet));
-        xTaskCreatePinnedToCore(taskEntry, _label, TASK_STACK,
-                                this, 1, &_taskHandle, 0);
+        if (!_mutex || !_queue) {
+            Serial.printf("[%s] Failed to allocate task resources.\n", _label);
+            return false;
+        }
+        BaseType_t created = xTaskCreatePinnedToCore(
+            taskEntry, _label, TASK_STACK, this, 1, &_taskHandle, 0);
+        if (created != pdPASS) {
+            Serial.printf("[%s] Failed to create task.\n", _label);
+            _taskHandle = nullptr;
+            return false;
+        }
+        return true;
     }
 
-    // Non-blocking — drops oldest packet if queue full (RTCM is time-sensitive)
+    // Non-blocking. If the queue overflows, reconnect rather than continue a
+    // TCP stream after silently dropping arbitrary RTCM bytes.
     void push(const uint8_t *data, size_t len) {
-        if (!_queue || _suspended || len == 0) return;
+        if (!_queue || _suspended || _reconnect || !_configured || len == 0) return;
         Packet pkt;
         pkt.len = (uint16_t)min(len, (size_t)MAX_PKT_BYTES);
         memcpy(pkt.data, data, pkt.len);
         if (xQueueSend(_queue, &pkt, 0) != pdTRUE) {
-            Packet discard;
-            xQueueReceive(_queue, &discard, 0);
-            xQueueSend(_queue, &pkt, 0);
+            _reconnect = true;
         }
     }
 
     void setCredentials(const String &mountpoint, const String &password) {
+        lock();
         _mountpoint = mountpoint;
-        _password   = password;
+        _password = password;
+        _configured = mountpoint.length() > 0;
+        unlock();
         _reconnect  = true;
     }
 
-    // Suspend sending (survey mode) — disconnects and drains the queue
-    void disconnect() {
+    // Suspend sending and wait until the worker has closed the socket.
+    void requestSuspend() {
+        _suspendAck = false;
         _suspended = true;
-        if (_queue) {
-            Packet discard;
-            while (xQueueReceive(_queue, &discard, 0) == pdTRUE) {}
+    }
+
+    bool suspendAndWait(uint32_t timeoutMs = 2000) {
+        requestSuspend();
+        uint32_t started = millis();
+        while (!_suspendAck && millis() - started < timeoutMs) {
+            delay(10);
         }
+        return _suspendAck;
     }
 
     // Resume sending (base TX mode)
-    void resume() { _suspended = false; }
+    void resume() {
+        _suspendAck = false;
+        _suspended = false;
+    }
 
-    // Safe to read from main loop (volatile primitives; String races are benign for display)
-    bool     connected()      const { return _connected; }
-    String   lastStatus()     const { return _lastStatus; }
-    String   lastError()      const { return _lastError; }
-    uint32_t bytesSent()      const { return _bytesSent; }
-    void     clearBytesSent()       { _bytesSent = 0; }
+    bool connected() const {
+        lock();
+        bool value = _connected;
+        unlock();
+        return value;
+    }
+
+    String lastStatus() const {
+        lock();
+        String value = _lastStatus;
+        unlock();
+        return value;
+    }
+
+    uint32_t takeBytesSent() {
+        lock();
+        uint32_t value = _bytesSent;
+        _bytesSent = 0;
+        unlock();
+        return value;
+    }
 
     // Stack headroom in bytes — low values (<512) indicate risk of stack overflow
     uint32_t stackWatermark() const {
@@ -97,11 +136,14 @@ private:
     WiFiClient    _client;
     QueueHandle_t _queue      = nullptr;
     TaskHandle_t  _taskHandle = nullptr;
+    mutable SemaphoreHandle_t _mutex = nullptr;
 
-    volatile bool     _connected  = false;
+    bool              _connected  = false;
     volatile bool     _suspended  = false;
+    volatile bool     _suspendAck = false;
     volatile bool     _reconnect  = false;
-    volatile uint32_t _bytesSent  = 0;
+    volatile bool     _configured = false;
+    uint32_t          _bytesSent  = 0;
 
     String        _lastStatus;
     String        _lastError;
@@ -125,19 +167,26 @@ private:
         while (true) {
             if (_suspended) {
                 if (_client.connected()) _client.stop();
-                _connected = false;
+                setConnectedState(false);
+                if (_queue) xQueueReset(_queue);
+                _suspendAck = true;
                 vTaskDelay(pdMS_TO_TICKS(200));
                 continue;
             }
 
             if (_reconnect) {
                 _client.stop();
-                _connected = false;
+                setConnectedState(false);
+                if (_queue) xQueueReset(_queue);
                 _reconnect = false;
             }
 
             if (!_client.connected()) {
-                _connected = false;
+                if (connected()) {
+                    setError("connection closed - retrying");
+                } else {
+                    setConnectedState(false);
+                }
                 doConnect();
                 continue;
             }
@@ -147,19 +196,32 @@ private:
                 continue;
             }
 
-            size_t written = _client.write(pkt.data, pkt.len);
-            _bytesSent += written;
+            if (_suspended) continue;
+            writePacket(pkt);
+        }
+    }
 
-            if (written == 0) {
-                if (++_stalls >= 5) {
-                    setError("Send stalled x5 — reconnecting");
-                    _client.stop();
-                    _connected = false;
-                    _stalls = 0;
-                }
-            } else {
+    void writePacket(const Packet &pkt) {
+        size_t offset = 0;
+        while (offset < pkt.len && !_suspended && _client.connected()) {
+            size_t written = _client.write(pkt.data + offset, pkt.len - offset);
+            if (written > 0) {
+                offset += written;
                 _stalls = 0;
+                lock();
+                _bytesSent += written;
+                unlock();
+                continue;
             }
+
+            if (++_stalls >= 5) {
+                setError("send stalled x5 - reconnecting");
+                _client.stop();
+                setConnectedState(false);
+                _stalls = 0;
+                return;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 
@@ -167,13 +229,20 @@ private:
     // Connection (runs inside the task — blocking is fine here)
     // -------------------------------------------------------------------------
     void doConnect() {
-        if (_mountpoint.length() == 0) {
-            _lastStatus = "no mountpoint configured";
+        String mountpoint;
+        String password;
+        lock();
+        mountpoint = _mountpoint;
+        password = _password;
+        unlock();
+
+        if (mountpoint.length() == 0) {
+            setStatus("no mountpoint configured");
             vTaskDelay(pdMS_TO_TICKS(5000));
             return;
         }
         if (WiFi.status() != WL_CONNECTED) {
-            _lastStatus = "waiting for WiFi";
+            setStatus("waiting for WiFi");
             vTaskDelay(pdMS_TO_TICKS(1000));
             return;
         }
@@ -185,9 +254,9 @@ private:
         }
         _lastAttemptMs = now;
 
-        _lastStatus = "connecting";
+        setStatus("connecting");
         Serial.printf("[%s] Connecting to %s:%d/%s (v%s)\n",
-                      _label, _host, _port, _mountpoint.c_str(),
+                      _label, _host, _port, mountpoint.c_str(),
                       _proto == Protocol::V2 ? "2" : "1");
 
         _client.setTimeout(3000);
@@ -196,19 +265,24 @@ private:
             return;
         }
 
-        if (_proto == Protocol::V2) connectV2();
-        else                        connectV1();
+        if (_proto == Protocol::V2) connectV2(mountpoint, password);
+        else                        connectV1(mountpoint, password);
     }
 
-    void connectV1() {
-        _client.printf("SOURCE %s /%s\r\n", _password.c_str(), _mountpoint.c_str());
+    void connectV1(const String &mountpoint, const String &password) {
+        _client.printf("SOURCE %s /%s\r\n", password.c_str(), mountpoint.c_str());
         _client.printf("Source-Agent: NTRIP ESP32BaseStation/1.0\r\n");
         _client.printf("\r\n");
 
         String line = readLine(3000);
         Serial.printf("[%s] << %s\n", _label, line.c_str());
 
-        if (line.startsWith("ICY 200 OK")) {
+        if (line.startsWith("ICY 200 OK") ||
+            line.startsWith("HTTP/1.1 200") ||
+            line.startsWith("HTTP/1.0 200")) {
+            if (line.startsWith("HTTP/")) {
+                drainHeaders();
+            }
             setConnected("connected (v1)");
         } else {
             setError("rejected: " + line);
@@ -216,9 +290,9 @@ private:
         }
     }
 
-    void connectV2() {
-        String auth = base64Encode(_mountpoint + ":" + _password);
-        _client.printf("POST /%s HTTP/1.1\r\n",       _mountpoint.c_str());
+    void connectV2(const String &mountpoint, const String &password) {
+        String auth = base64Encode(mountpoint + ":" + password);
+        _client.printf("POST /%s HTTP/1.1\r\n",       mountpoint.c_str());
         _client.printf("Host: %s:%d\r\n",             _host, _port);
         _client.printf("Ntrip-Version: Ntrip/2.0\r\n");
         _client.printf("User-Agent: NTRIP ESP32BaseStation/1.0\r\n");
@@ -232,11 +306,7 @@ private:
 
         if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")
                 || line.startsWith("ICY 200")) {
-            while (true) {
-                String hdr = readLine(1000);
-                if (hdr.length() == 0) break;
-                Serial.printf("[%s] hdr: %s\n", _label, hdr.c_str());
-            }
+            if (line.startsWith("HTTP/")) drainHeaders();
             setConnected("connected (v2)");
         } else {
             setError("rejected: " + line);
@@ -248,8 +318,11 @@ private:
     // Helpers
     // -------------------------------------------------------------------------
     void setError(const String &msg) {
+        lock();
         _lastError  = msg;
         _lastStatus = msg;
+        _connected = false;
+        unlock();
         _failCount++;
         _retryIntervalMs = min(RETRY_BASE_MS << min(_failCount, 3), RETRY_MAX_MS);
         Serial.printf("[%s] Error: %s (retry in %lus)\n",
@@ -257,12 +330,34 @@ private:
     }
 
     void setConnected(const String &msg) {
+        lock();
         _lastError       = "";
         _lastStatus      = msg;
         _connected       = true;
+        unlock();
         _failCount       = 0;
         _retryIntervalMs = RETRY_BASE_MS;
         Serial.printf("[%s] %s\n", _label, msg.c_str());
+    }
+
+    void setStatus(const String &msg) {
+        lock();
+        _lastStatus = msg;
+        unlock();
+    }
+
+    void setConnectedState(bool connected) {
+        lock();
+        _connected = connected;
+        unlock();
+    }
+
+    void lock() const {
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+    }
+
+    void unlock() const {
+        if (_mutex) xSemaphoreGive(_mutex);
     }
 
     String readLine(uint32_t timeoutMs) {
@@ -278,6 +373,14 @@ private:
         }
         line.trim();
         return line;
+    }
+
+    void drainHeaders() {
+        while (true) {
+            String header = readLine(1000);
+            if (header.length() == 0) break;
+            Serial.printf("[%s] hdr: %s\n", _label, header.c_str());
+        }
     }
 
     static String base64Encode(const String &input) {

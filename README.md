@@ -1,6 +1,6 @@
 # GPS RTK Base Station
 
-An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. Performs an automated survey-in to determine its own position, then streams RTCM3 correction data to multiple NTRIP casters simultaneously — enabling centimetre-level RTK positioning for rovers on your local network or anywhere on the internet.
+An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estimates or accepts a fixed antenna position, then streams RTCM3 correction data to multiple NTRIP casters simultaneously. Rover precision can be centimetre-level, but absolute accuracy is limited by the accuracy of the configured base position.
 
 ## Features
 
@@ -77,33 +77,24 @@ Built with [PlatformIO](https://platformio.org/). All dependencies are part of t
 2. Clone this repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/gps-base-station.git
+git clone https://github.com/aziobro/gps-base-station.git
 cd gps-base-station
 ```
 
 ### Configuration
 
-Edit `src/config.h` before first flash to set your credentials:
+Runtime credentials should be configured through the web interface. For
+optional compile-time defaults, copy the ignored secrets template:
 
-```cpp
-// WiFi (can also be set via the web provisioning portal)
-#define WIFI_SSID     "YourNetworkName"
-#define WIFI_PASSWORD "YourPassword"
-
-// RTK2go — register at rtk2go.com
-#define RTK2GO_MOUNTPOINT "YOUR_MOUNTPOINT"
-#define RTK2GO_PASSWORD   "YOUR_PASSWORD"
-
-// Onocoy — register at console.onocoy.com
-#define ONOCOY_MOUNTPOINT "YOUR_MOUNTPOINT"
-#define ONOCOY_PASSWORD   "YOUR_API_KEY"
-
-// RTKdata.online — register at rtkdata.online
-#define RTKDATA_MOUNTPOINT "YOUR_MOUNTPOINT"
-#define RTKDATA_PASSWORD   "YOUR_PASSWORD"
+```bash
+cp src/secrets.example.h src/secrets.h
 ```
 
-> **Note:** WiFi credentials and NTRIP passwords can also be configured at runtime via the web UI without reflashing.
+Then edit `src/secrets.h`. Never commit that file; it is excluded by
+`.gitignore`.
+
+> Credentials committed in an earlier revision remain in Git history. Rotate
+> any exposed WiFi or service passwords before using the station.
 
 ### First Flash (USB)
 
@@ -135,7 +126,8 @@ Once connected, find the device IP from your router or the serial monitor output
 | URL | Description |
 |-----|-------------|
 | `http://<ip>/` | Status page — live satellite counts, RTCM throughput, service status |
-| `http://<ip>/config` | Configuration — NTRIP credentials, enable/disable services |
+| `http://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
+| `http://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
 | `http://<ip>/update` | OTA firmware update |
 
 The web UI is password protected. On first access you'll be prompted to set an admin password.
@@ -149,16 +141,19 @@ The web UI is password protected. On first access you'll be prompted to set an a
 On first boot (or after pressing **Start New Survey-in**), the device enters survey-in mode:
 
 1. The UM980 streams BESTPOS fixes every 5 seconds via COM2
-2. The ESP32 computes a running mean and standard deviation (σ of the mean) using Welford's algorithm
+2. The ESP32 computes a running mean and an estimated precision of that mean using Welford's algorithm
 3. Survey completes when **both** conditions are met:
    - Minimum 300 seconds elapsed
    - 3D position σ ≤ 0.50 m
 4. The converged position is saved to NVS flash
 5. The device automatically switches to Base TX mode
 
-The survey panel on the status page shows real-time σ, satellite counts, and a convergence chart.
+The survey panel on the status page shows the estimated precision, satellite counts, and a convergence chart.
 
-> σ_mean decreases as σ_single / √N. Typical UM980 per-fix σ ~2.1 m converges to ~0.27 m after 300 s.
+> Consecutive GNSS fixes are correlated, so σ/√N can be optimistic and does
+> not establish survey-grade absolute coordinates. For high absolute accuracy,
+> enter a professionally surveyed or externally post-processed position on the
+> configuration page.
 
 ### Base TX Mode
 

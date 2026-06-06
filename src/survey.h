@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <errno.h>
 #include <math.h>
 #include "config.h"
 #include "storage.h"
@@ -250,12 +251,27 @@ private:
         String solStatus = tokens[0];
         if (solStatus != "SOL_COMPUTED") return;  // skip until fix
 
-        double lat    = tokens[2].toDouble();
-        double lon    = tokens[3].toDouble();
-        double hgt    = tokens[4].toDouble();
-        float  latSig = tokens[7].toFloat();   // per-fix sigma (info only)
-        float  lonSig = tokens[8].toFloat();
-        float  hgtSig = (count > 9) ? tokens[9].toFloat() : 0;
+        double lat = 0, lon = 0, hgt = 0;
+        double latSigRaw = 0, lonSigRaw = 0, hgtSigRaw = 0;
+        if (!parseFiniteNumber(tokens[2], lat) ||
+            !parseFiniteNumber(tokens[3], lon) ||
+            !parseFiniteNumber(tokens[4], hgt) ||
+            !parseFiniteNumber(tokens[7], latSigRaw) ||
+            !parseFiniteNumber(tokens[8], lonSigRaw) ||
+            count <= 9 ||
+            !parseFiniteNumber(tokens[9], hgtSigRaw)) {
+            return;
+        }
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180 ||
+            hgt < -1000 || hgt > 20000 ||
+            latSigRaw < 0 || lonSigRaw < 0 || hgtSigRaw < 0 ||
+            latSigRaw > 100 || lonSigRaw > 100 || hgtSigRaw > 100) {
+            return;
+        }
+
+        float latSig = (float)latSigRaw;   // per-fix sigma (info only)
+        float lonSig = (float)lonSigRaw;
+        float hgtSig = (float)hgtSigRaw;
         int    svUsed = (count > 13) ? tokens[13].toInt() : 0;
         int    svTrkd = (count > 14) ? tokens[14].toInt() : 0;
 
@@ -289,12 +305,22 @@ private:
                       elapsed, _n, sigma3d, instSig, svUsed, svTrkd, svBuf,
                       _meanLat, _meanLon, _meanHgt);
 
-        // Update live data
-        _live = { _meanLat, _meanLon, _meanHgt,
-                  sigma3d, instSig,
-                  svUsed, svTrkd,
-                  _svGPS, _svGLO, _svGAL, _svBDS,
-                  elapsed, _n, true };
+        // Assign fields explicitly for compatibility across Arduino-ESP32
+        // toolchains and to keep this structure safe to extend.
+        _live.lat = _meanLat;
+        _live.lon = _meanLon;
+        _live.hgt = _meanHgt;
+        _live.sigma = sigma3d;
+        _live.sigmaInst = instSig;
+        _live.svUsed = svUsed;
+        _live.svTracked = svTrkd;
+        _live.svGPS = _svGPS;
+        _live.svGLO = _svGLO;
+        _live.svGAL = _svGAL;
+        _live.svBDS = _svBDS;
+        _live.elapsed = elapsed;
+        _live.samples = _n;
+        _live.valid = true;
 
         // Push our computed sigma to history (skip first sample — sigma is undefined)
         if (_n >= 2) {
@@ -326,6 +352,16 @@ private:
                           "Mean: %.8f, %.8f, %.4f  σ3D=%.4fm\n",
                           elapsed, _n, _meanLat, _meanLon, _meanHgt, sigma3d);
         }
+    }
+
+    static bool parseFiniteNumber(String value, double &result) {
+        value.trim();
+        if (value.length() == 0) return false;
+        errno = 0;
+        char *end = nullptr;
+        result = strtod(value.c_str(), &end);
+        return errno == 0 && end != value.c_str() && *end == '\0' &&
+               isfinite(result);
     }
 
     // ------------------------------------------------------------------

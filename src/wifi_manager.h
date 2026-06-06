@@ -19,9 +19,10 @@
 // to NVS and device restarts in STA mode.
 // ---------------------------------------------------------------------------
 
-static constexpr const char *AP_SSID     = "GPS-BaseStation";
-static constexpr uint16_t    DNS_PORT    = 53;
+static constexpr const char *AP_SSID            = "GPS-BaseStation";
+static constexpr uint16_t    DNS_PORT           = 53;
 static constexpr uint32_t    CONNECT_TIMEOUT_MS = 15000;
+static constexpr uint32_t    AP_RETRY_INTERVAL  = 120000;  // try reconnect every 2 min
 
 class WiFiManager {
 public:
@@ -55,10 +56,36 @@ public:
         return State::AP_MODE;
     }
 
-    // Call from loop() while in AP_MODE.
-    void update() {
+    // Call from loop() while in AP_MODE. The AP remains available while the
+    // station interface periodically retries saved credentials.
+    bool update() {
         _dns.processNextRequest();
         _server.handleClient();
+
+        unsigned long now = millis();
+        if (_staTrying) {
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("[WiFi] Reconnected - restarting.");
+                delay(500);
+                ESP.restart();
+            }
+            if (now - _staAttemptStarted >= CONNECT_TIMEOUT_MS) {
+                Serial.println("[WiFi] Retry failed - AP remains available.");
+                WiFi.disconnect(false, false);
+                _staTrying = false;
+                _lastRetryMs = now;
+            }
+        } else if (now - _lastRetryMs >= AP_RETRY_INTERVAL) {
+            _lastRetryMs = now;
+            auto saved = _storage->loadWiFi();
+            if (saved.valid) {
+                Serial.println("[WiFi] AP mode - retrying saved credentials.");
+                WiFi.begin(saved.ssid.c_str(), saved.password.c_str());
+                _staAttemptStarted = now;
+                _staTrying = true;
+            }
+        }
+        return false;
     }
 
     String ip() {
@@ -66,9 +93,12 @@ public:
     }
 
 private:
-    Storage   *_storage = nullptr;
-    DNSServer  _dns;
-    WebServer  _server{80};
+    Storage       *_storage     = nullptr;
+    unsigned long  _lastRetryMs = 0;
+    unsigned long  _staAttemptStarted = 0;
+    bool           _staTrying = false;
+    DNSServer      _dns;
+    WebServer      _server{80};
 
     // ------------------------------------------------------------------
     bool tryConnect(const char *ssid, const char *pw) {
@@ -91,7 +121,7 @@ private:
     // ------------------------------------------------------------------
     void startAP() {
         WiFi.disconnect(true);
-        WiFi.mode(WIFI_AP);
+        WiFi.mode(WIFI_AP_STA);
         WiFi.softAP(AP_SSID);  // open network — no password needed to connect
         delay(200);
         Serial.printf("[WiFi] AP mode. SSID='%s'  http://%s\n",

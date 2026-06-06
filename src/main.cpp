@@ -83,6 +83,13 @@ void checkWiFi() {
 }
 
 void startBaseTx(double lat, double lon, double height) {
+    if (rtk2go)  rtk2go->suspendAndWait();
+    if (onocoy)  onocoy->suspendAndWait();
+    if (rtkdata) rtkdata->suspendAndWait();
+
+    survey.reset();
+    while (dataSerial.available()) dataSerial.read();
+
     mode = Mode::BASE_TX;
     um980Init(cmdSerial, lat, lon, height);
     if (rtk2go)  rtk2go->resume();
@@ -95,11 +102,12 @@ void startBaseTx(double lat, double lon, double height) {
 void startSurvey() {
     mode = Mode::SURVEY;
     storage.clearPosition();
-    // Disconnect NTRIP clients — no data should be sent during survey
-    if (rtk2go)  rtk2go->disconnect();
-    if (onocoy)  onocoy->disconnect();
-    if (rtkdata) rtkdata->disconnect();
+    // Wait for every worker to close before collecting a new base position.
+    if (rtk2go)  rtk2go->suspendAndWait();
+    if (onocoy)  onocoy->suspendAndWait();
+    if (rtkdata) rtkdata->suspendAndWait();
     survey.start(cmdSerial);
+    while (dataSerial.available()) dataSerial.read();
     Serial.printf("[Survey] Monitoring page: http://%s/\n",
                   WiFi.localIP().toString().c_str());
 }
@@ -168,16 +176,32 @@ void setup() {
                                    "RTKdata", NtripPushClient::Protocol::V1);
 
     // Each client runs on its own FreeRTOS task on Core 0 — non-blocking from main loop
-    rtk2go->startTask();
-    onocoy->startTask();
-    rtkdata->startTask();
+    bool r2gTaskOk = rtk2go->startTask();
+    bool oncTaskOk = onocoy->startTask();
+    bool rtkTaskOk = rtkdata->startTask();
+    if (!r2gTaskOk || !oncTaskOk || !rtkTaskOk) {
+        Serial.println("[Main] One or more NTRIP tasks failed to start.");
+    }
 
-    localCaster.begin();
+    if (!localCaster.begin()) {
+        Serial.println("[Main] Local NTRIP caster failed to start.");
+    }
 
     webStatus.begin();
     webStatus.onSurveyRequested([]() {
         Serial.println("[Main] Survey requested via web.");
         startSurvey();
+    });
+    webStatus.onPositionSet([](double lat, double lon, double hgt) {
+        Serial.printf("[Main] Manual position set via web: %.8f, %.8f, %.4f\n", lat, lon, hgt);
+        startBaseTx(lat, lon, hgt);
+    });
+    webStatus.onOtaStart([]() {
+        Serial.println("[Main] OTA starting - suspending upstream NTRIP streams.");
+        if (rtk2go)  rtk2go->requestSuspend();
+        if (onocoy)  onocoy->requestSuspend();
+        if (rtkdata) rtkdata->requestSuspend();
+        delay(250);
     });
 
     BasePosition stored = storage.loadPosition();
@@ -201,6 +225,10 @@ void loop() {
     webStatus.update();
 
     if (mode == Mode::SURVEY) {
+        // COM3 may still contain bytes emitted before UNLOGALL was processed.
+        // Discard continuously so no stale corrections survive into BASE_TX.
+        while (dataSerial.available()) dataSerial.read();
+
         while (cmdSerial.available()) {
             survey.feed((uint8_t)cmdSerial.read());
         }
@@ -228,14 +256,12 @@ void loop() {
             onocoy->push(rtcmBuf, len);
             rtkdata->push(rtcmBuf, len);
             rtcmByteCount += len;
-        } else {
-            localCaster.update(nullptr, 0);
         }
 
         // Drain per-provider byte counters into rolling accumulators
-        uint32_t r2gB = rtk2go->bytesSent(); rtk2go->clearBytesSent();
-        uint32_t oncB = onocoy->bytesSent();  onocoy->clearBytesSent();
-        uint32_t rtkB = rtkdata->bytesSent(); rtkdata->clearBytesSent();
+        uint32_t r2gB = rtk2go->takeBytesSent();
+        uint32_t oncB = onocoy->takeBytesSent();
+        uint32_t rtkB = rtkdata->takeBytesSent();
         r2gStats.accumMin += r2gB; r2gStats.accumHr += r2gB;
         oncStats.accumMin += oncB; oncStats.accumHr += oncB;
         rtkStats.accumMin += rtkB; rtkStats.accumHr += rtkB;
