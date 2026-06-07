@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "lwip/tcp.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mbedtls/base64.h"
@@ -231,25 +232,44 @@ bool NtripPushClient::connect_socket() {
         close_socket();
         return false;
     }
-    fcntl(socket_, F_SETFL, flags);
-    timeval io_timeout{3, 0};
-    setsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
-    setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
     int keepalive = 1;
     setsockopt(socket_, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    int keep_idle = 15;
+    int keep_interval = 5;
+    int keep_count = 3;
+    setsockopt(socket_, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
+    setsockopt(
+        socket_, IPPROTO_TCP, TCP_KEEPINTVL, &keep_interval,
+        sizeof(keep_interval));
+    setsockopt(
+        socket_, IPPROTO_TCP, TCP_KEEPCNT, &keep_count, sizeof(keep_count));
     return true;
 }
 
 bool NtripPushClient::send_all(const uint8_t *data, size_t length) {
     size_t offset = 0;
+    int stalled_seconds = 0;
     while (offset < length && socket_ >= 0 && !suspended_ && !stopping_) {
-        const int sent = send(socket_, data + offset, length - offset, 0);
+        const int sent = send(
+            socket_, data + offset, length - offset, MSG_DONTWAIT);
         if (sent > 0) {
             offset += sent;
             bytes_sent_ += sent;
+            stalled_seconds = 0;
             continue;
         }
         if (sent < 0 && errno == EINTR) continue;
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set write_set;
+            FD_ZERO(&write_set);
+            FD_SET(socket_, &write_set);
+            timeval timeout{1, 0};
+            const int ready = select(
+                socket_ + 1, nullptr, &write_set, nullptr, &timeout);
+            if (ready > 0) continue;
+            if (ready < 0 && errno == EINTR) continue;
+            if (++stalled_seconds < 5) continue;
+        }
         return false;
     }
     return offset == length;
@@ -260,8 +280,19 @@ std::string NtripPushClient::read_line(int timeout_ms) {
     const TickType_t started = xTaskGetTickCount();
     while ((xTaskGetTickCount() - started) * portTICK_PERIOD_MS <
            static_cast<TickType_t>(timeout_ms)) {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(socket_, &read_set);
+        timeval wait{0, 100000};
+        const int ready = select(
+            socket_ + 1, &read_set, nullptr, nullptr, &wait);
+        if (ready == 0) continue;
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         char byte = 0;
-        const int received = recv(socket_, &byte, 1, 0);
+        const int received = recv(socket_, &byte, 1, MSG_DONTWAIT);
         if (received == 1) {
             if (byte == '\n') break;
             if (byte != '\r' && line.size() < 255) line.push_back(byte);

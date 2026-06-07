@@ -40,6 +40,7 @@ extern const unsigned char ca_cert_end[]
 std::string page(const char *title, const std::string &content) {
     return "<!doctype html><html><head><meta charset='utf-8'>"
            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+           "<link rel='icon' href='data:,'>"
            "<title>" + std::string(title) + "</title><style>"
            "body{font-family:monospace;background:#111;color:#cfc;padding:1em;"
            "max-width:720px;margin:auto}h1,h2{color:#0f0}"
@@ -47,9 +48,66 @@ std::string page(const char *title, const std::string &content) {
            "padding:6px}input{width:100%;max-width:420px;padding:7px;"
            "background:#1a1a1a;color:#cfc;border:1px solid #444;box-sizing:border-box}"
            "button{padding:8px 16px;background:#1a1a1a;color:#0f0;"
-           "border:1px solid #0f0}.warn{color:#fa0}.err{color:#f44}"
+           "border:1px solid #0f0}.ok{color:#0f0}.warn{color:#fa0}.err{color:#f44}"
+           ".dim{opacity:.6}"
            "a{color:#0d0}</style></head><body><h1>GPS Base Station</h1>" +
            content + "</body></html>";
+}
+
+std::string human_bytes(uint64_t bytes) {
+    char text[32];
+    if (bytes >= 1024ULL * 1024ULL) {
+        snprintf(text, sizeof(text), "%.1f MB",
+                 static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else if (bytes >= 1024) {
+        snprintf(text, sizeof(text), "%.1f KB",
+                 static_cast<double>(bytes) / 1024.0);
+    } else {
+        snprintf(text, sizeof(text), "%llu B",
+                 static_cast<unsigned long long>(bytes));
+    }
+    return text;
+}
+
+std::string escape_html_text(const std::string &value) {
+    std::string out;
+    for (char c : value) {
+        if (c == '&') out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else if (c == '"') out += "&quot;";
+        else if (c == '\'') out += "&#39;";
+        else out += c;
+    }
+    return out;
+}
+
+std::string service_html(const NtripStatus &status) {
+    if (!status.enabled) return "<span class='warn'>disabled</span>";
+    const char *css = status.connected ? "ok" : "err";
+    const std::string label =
+        status.connected ? "connected" : escape_html_text(status.message);
+    return "<span class='" + std::string(css) + "'>" + label + "</span>"
+           " <span class='dim'>| " + human_bytes(status.bytes_sent) +
+           " sent | " + std::to_string(status.dropped_batches) +
+           " dropped</span>";
+}
+
+std::string rssi_html(int rssi) {
+    const char *css = "err";
+    const char *health = "weak";
+    if (rssi >= -60) {
+        css = "ok";
+        health = "excellent";
+    } else if (rssi >= -70) {
+        css = "ok";
+        health = "good";
+    } else if (rssi >= -80) {
+        css = "warn";
+        health = "fair";
+    }
+    return "<span class='" + std::string(css) + "'>" +
+           std::to_string(rssi) + " dBm (" + health + ")</span>";
 }
 
 bool parse_double(const std::string &text, double &value) {
@@ -223,39 +281,91 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         strlcpy(position_row, "not set", sizeof(position_row));
     }
 
+    const int rssi = server->wifi_->rssi();
+    const std::string ssid = server->wifi_->ssid();
+    const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    const size_t total_heap = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+    const unsigned free_percent =
+        total_heap ? static_cast<unsigned>(free_heap * 100 / total_heap) : 0;
+    const char *heap_class =
+        free_percent >= 40 ? "ok" : (free_percent >= 20 ? "warn" : "err");
+    const unsigned satellite_total =
+        station.survey.gps + station.survey.glonass +
+        station.survey.galileo + station.survey.beidou;
+
     std::string content =
-        "<h2>ESP-IDF Migration Status</h2><table>"
+        "<h2>Status</h2><table>"
         "<tr><td>Framework</td><td>ESP-IDF " + std::string(esp_get_idf_version()) + "</td></tr>"
         "<tr><td>Application</td><td>" + std::string(esp_app_get_description()->version) + "</td></tr>"
-        "<tr><td>WiFi</td><td>" + wifi_state + "</td></tr>"
-        "<tr><td>IP</td><td>" + html_escape(ip.empty() ? "192.168.4.1" : ip) + "</td></tr>"
-        "<tr><td>RSSI</td><td>" + std::to_string(server->wifi_->rssi()) + " dBm</td></tr>"
-        "<tr><td>Mode</td><td>" +
-        std::string(station.mode == BaseMode::kTransmit ? "Base TX" : "Survey") +
+        "<tr><td>System health</td><td id='st-health'><span class='" +
+        std::string(server->station_->healthy() ? "ok'>healthy" : "err'>unhealthy") +
+        "</span></td></tr>"
+        "<tr><td>WiFi</td><td id='st-wifi'>" + wifi_state +
+        (ssid.empty() ? "" : " <span class='dim'>| " + html_escape(ssid) + "</span>") +
+        "</td></tr>"
+        "<tr><td>IP</td><td id='st-ip'>" +
+        html_escape(ip.empty() ? "192.168.4.1" : ip) + "</td></tr>"
+        "<tr><td>WiFi signal</td><td id='st-rssi'>" + rssi_html(rssi) + "</td></tr>"
+        "<tr><td>Mode</td><td id='st-mode'><span class='" +
+        std::string(station.mode == BaseMode::kTransmit ? "ok'>Base TX" : "warn'>Survey") +
+        "</span>"
         "</td></tr>"
         "<tr><td>Position</td><td>" + std::string(position_row) + "</td></tr>"
-        "<tr><td>Satellites</td><td>GPS " +
+        "<tr><td>Satellites</td><td id='st-sats'>GPS " +
         std::to_string(station.survey.gps) + " / GLO " +
         std::to_string(station.survey.glonass) + " / GAL " +
         std::to_string(station.survey.galileo) + " / BDS " +
-        std::to_string(station.survey.beidou) + "</td></tr>"
-        "<tr><td>RTCM</td><td>" +
-        std::to_string(station.rtcm_bytes_per_second) + " B/s</td></tr>"
-        "<tr><td>RTK2go</td><td>" +
-        html_escape(station.rtk2go.message) + " / " +
-        std::to_string(station.rtk2go.bytes_sent) + " bytes</td></tr>"
-        "<tr><td>Onocoy</td><td>" +
-        html_escape(station.onocoy.message) + " / " +
-        std::to_string(station.onocoy.bytes_sent) + " bytes</td></tr>"
-        "<tr><td>RTKdata</td><td>" +
-        html_escape(station.rtkdata.message) + " / " +
-        std::to_string(station.rtkdata.bytes_sent) + " bytes</td></tr>"
-        "<tr><td>Free heap</td><td>" +
-        std::to_string(heap_caps_get_free_size(MALLOC_CAP_8BIT)) + " bytes</td></tr>"
+        std::to_string(station.survey.beidou) +
+        " <span class='dim'>| total " + std::to_string(satellite_total) +
+        "</span></td></tr>"
+        "<tr><td>RTCM</td><td id='st-rtcm'>" +
+        std::to_string(station.rtcm_bytes_per_second) + " B/s"
+        " <span class='dim'>| " + human_bytes(station.rtcm_bytes_total) +
+        " total</span></td></tr>"
+        "<tr><td>Local NTRIP clients</td><td id='st-clients'>" +
+        std::to_string(station.local_clients) + "</td></tr>"
+        "<tr><td>RTK2go</td><td id='st-r2g'>" +
+        service_html(station.rtk2go) + "</td></tr>"
+        "<tr><td>Onocoy</td><td id='st-onc'>" +
+        service_html(station.onocoy) + "</td></tr>"
+        "<tr><td>RTKdata</td><td id='st-rtk'>" +
+        service_html(station.rtkdata) + "</td></tr>"
+        "<tr><td>Free heap</td><td id='st-heap'><span class='" +
+        std::string(heap_class) + "'>" + human_bytes(free_heap) + " (" +
+        std::to_string(free_percent) + "% free)</span>"
+        " <span class='dim'>| low watermark " +
+        human_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)) +
+        "</span></td></tr>"
         "</table><p><a href='/config'>Configuration</a> &nbsp; "
         "<a href='/skyplot'>Sky plot</a> &nbsp; "
         "<a href='/status'>JSON status</a> &nbsp; "
-        "<a href='/update'>Firmware update</a></p>";
+        "<a href='/update'>Firmware update</a></p>"
+        R"HTML(<script>
+let statusRequest=false;
+function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function bytes(v){return v>=1048576?(v/1048576).toFixed(1)+' MB':v>=1024?(v/1024).toFixed(1)+' KB':v+' B';}
+function set(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v;}
+function svc(p){if(!p.enabled)return "<span class='warn'>disabled</span>";const c=p.connected?'ok':'err',m=p.connected?'connected':esc(p.message);return "<span class='"+c+"'>"+m+"</span> <span class='dim'>| "+bytes(p.bytes)+" sent | "+p.dropped+" dropped</span>";}
+async function refresh(){
+ if(statusRequest)return;statusRequest=true;
+ try{
+  const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);
+  const d=await r.json(),total=d.gps+d.glonass+d.galileo+d.beidou;
+  set('st-health',"<span class='"+(d.healthy?'ok':'err')+"'>"+(d.healthy?'healthy':'unhealthy')+"</span>");
+  set('st-wifi',(d.wifi_connected?'connected':d.ap_active?'AP fallback':'disconnected')+(d.ssid?" <span class='dim'>| "+esc(d.ssid)+"</span>":""));
+  set('st-ip',esc(d.ip||'192.168.4.1'));
+  const rc=d.rssi>=-70?'ok':d.rssi>=-80?'warn':'err',rh=d.rssi>=-60?'excellent':d.rssi>=-70?'good':d.rssi>=-80?'fair':'weak';
+  set('st-rssi',"<span class='"+rc+"'>"+d.rssi+" dBm ("+rh+")</span>");
+  set('st-mode',"<span class='"+(d.mode==='base_tx'?'ok':'warn')+"'>"+(d.mode==='base_tx'?'Base TX':'Survey')+"</span>");
+  set('st-sats','GPS '+d.gps+' / GLO '+d.glonass+' / GAL '+d.galileo+' / BDS '+d.beidou+" <span class='dim'>| total "+total+"</span>");
+  set('st-rtcm',d.rtcm_bps+" B/s <span class='dim'>| "+bytes(d.rtcm_total)+" total</span>");
+  set('st-clients',d.local_clients);set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
+  const hp=Math.round(d.free_heap*100/d.heap_total),hc=hp>=40?'ok':hp>=20?'warn':'err';
+  set('st-heap',"<span class='"+hc+"'>"+bytes(d.free_heap)+" ("+hp+"% free)</span> <span class='dim'>| low watermark "+bytes(d.min_free_heap)+"</span>");
+ }catch(e){}finally{statusRequest=false;setTimeout(refresh,15000);}
+}
+setTimeout(refresh,15000);
+</script>)HTML";
     return server->send_html(request, page("GPS Base Station", content));
 }
 
@@ -483,15 +593,29 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
 
     const BasePosition position = server->storage_->load_position();
     const BaseStationStatus station = server->station_->status();
+    auto provider_json = [](const NtripStatus &status) {
+        return std::string("{\"enabled\":") +
+            (status.enabled ? "true" : "false") +
+            ",\"connected\":" + (status.connected ? "true" : "false") +
+            ",\"message\":\"" + json_escape(status.message) +
+            "\",\"bytes\":" + std::to_string(status.bytes_sent) +
+            ",\"dropped\":" + std::to_string(status.dropped_batches) + "}";
+    };
+    const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     std::string body =
         "{\"framework\":\"ESP-IDF " + json_escape(esp_get_idf_version()) +
         "\",\"version\":\"" + json_escape(esp_app_get_description()->version) +
-        "\",\"wifi_connected\":" + (server->wifi_->connected() ? "true" : "false") +
+        "\",\"healthy\":" + (server->station_->healthy() ? "true" : "false") +
+        ",\"wifi_connected\":" + (server->wifi_->connected() ? "true" : "false") +
         ",\"ap_active\":" + (server->wifi_->access_point_active() ? "true" : "false") +
+        ",\"ssid\":\"" + json_escape(server->wifi_->ssid()) +
         ",\"ip\":\"" + json_escape(server->wifi_->ip_address()) +
         "\",\"rssi\":" + std::to_string(server->wifi_->rssi()) +
-        ",\"free_heap\":" +
-        std::to_string(heap_caps_get_free_size(MALLOC_CAP_8BIT)) +
+        ",\"free_heap\":" + std::to_string(free_heap) +
+        ",\"heap_total\":" +
+        std::to_string(heap_caps_get_total_size(MALLOC_CAP_8BIT)) +
+        ",\"min_free_heap\":" +
+        std::to_string(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)) +
         ",\"mode\":\"" +
         std::string(station.mode == BaseMode::kTransmit ? "base_tx" : "survey") +
         "\",\"rtcm_bps\":" +
@@ -501,6 +625,10 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"glonass\":" + std::to_string(station.survey.glonass) +
         ",\"galileo\":" + std::to_string(station.survey.galileo) +
         ",\"beidou\":" + std::to_string(station.survey.beidou) +
+        ",\"local_clients\":" + std::to_string(station.local_clients) +
+        ",\"rtk2go\":" + provider_json(station.rtk2go) +
+        ",\"onocoy\":" + provider_json(station.onocoy) +
+        ",\"rtkdata\":" + provider_json(station.rtkdata) +
         ",\"rtk2go_bytes\":" + std::to_string(station.rtk2go.bytes_sent) +
         ",\"onocoy_bytes\":" + std::to_string(station.onocoy.bytes_sent) +
         ",\"rtkdata_bytes\":" + std::to_string(station.rtkdata.bytes_sent) +

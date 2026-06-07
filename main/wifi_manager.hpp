@@ -39,6 +39,7 @@ public:
     bool connected() const;
     bool access_point_active() const;
     int rssi() const;
+    std::string ssid() const;
     std::string ip_address() const;
     std::vector<WifiNetwork> scan_networks();
 

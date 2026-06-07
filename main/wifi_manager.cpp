@@ -114,6 +114,15 @@ int WifiManager::rssi() const {
     return record.rssi;
 }
 
+std::string WifiManager::ssid() const {
+    if (!connected_) {
+        return access_point_active_ ? kAccessPointSsid : "";
+    }
+    wifi_ap_record_t record{};
+    if (esp_wifi_sta_get_ap_info(&record) != ESP_OK) return {};
+    return reinterpret_cast<const char *>(record.ssid);
+}
+
 std::string WifiManager::ip_address() const {
     if (!connected_ || !station_netif_) return {};
     esp_netif_ip_info_t info{};
