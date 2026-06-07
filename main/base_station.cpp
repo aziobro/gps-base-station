@@ -80,6 +80,7 @@ void BaseStation::stop() {
 }
 
 esp_err_t BaseStation::request_survey() {
+    if (!actions_) return ESP_ERR_INVALID_STATE;
     const Action action{ActionType::kSurvey, 0, 0, 0};
     return xQueueSend(actions_, &action, 0) == pdTRUE
         ? ESP_OK : ESP_ERR_TIMEOUT;
@@ -87,6 +88,7 @@ esp_err_t BaseStation::request_survey() {
 
 esp_err_t BaseStation::request_position(
     double lat, double lon, double height) {
+    if (!actions_) return ESP_ERR_INVALID_STATE;
     const Action action{ActionType::kPosition, lat, lon, height};
     return xQueueSend(actions_, &action, 0) == pdTRUE
         ? ESP_OK : ESP_ERR_TIMEOUT;

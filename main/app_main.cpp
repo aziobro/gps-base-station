@@ -73,6 +73,16 @@ void validate_ota_task(void *argument) {
     vTaskDelete(nullptr);
 }
 
+void enable_rtk_task(void *argument) {
+    vTaskDelay(pdMS_TO_TICKS(20000));
+    auto *station = static_cast<BaseStation *>(argument);
+    if (station) {
+        station->set_streams_suspended(false);
+        ESP_LOGI(kTag, "RTK services enabled after web startup window");
+    }
+    vTaskDelete(nullptr);
+}
+
 }  // namespace
 
 extern "C" void app_main() {
@@ -98,10 +108,19 @@ extern "C" void app_main() {
              wifi_manager.connected() ? "connected" : "AP fallback");
 
     static BaseStation base_station(storage, kCommandUart, kDataUart);
+    // Reserve the RTK task resources while keeping every data stream offline.
+    // HTTPS is brought up before outbound or local RTCM transmission begins.
+    base_station.set_streams_suspended(true);
     ESP_ERROR_CHECK(base_station.start());
 
     static AdminWebServer web_server;
     ESP_ERROR_CHECK(web_server.start(storage, wifi_manager, base_station));
+    ESP_LOGI(kTag, "Administration server ready; RTK services held briefly");
+
+    ESP_ERROR_CHECK(
+        xTaskCreate(
+            enable_rtk_task, "rtk_enable", 2048, &base_station, 3, nullptr)
+            == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     ESP_ERROR_CHECK(
         xTaskCreate(

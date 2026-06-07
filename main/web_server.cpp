@@ -134,11 +134,13 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.recv_wait_timeout = 10;
     tls_config.httpd.send_wait_timeout = 10;
     tls_config.httpd.lru_purge_enable = true;
-    tls_config.httpd.max_open_sockets = 2;
+    // Allow three dashboard tabs plus one administrative request (for
+    // example, configuration or OTA) without evicting an active TLS session.
+    tls_config.httpd.max_open_sockets = 4;
     tls_config.httpd.keep_alive_enable = true;
-    tls_config.httpd.keep_alive_idle = 30;
+    tls_config.httpd.keep_alive_idle = 15;
     tls_config.httpd.keep_alive_interval = 5;
-    tls_config.httpd.keep_alive_count = 3;
+    tls_config.httpd.keep_alive_count = 2;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
     tls_config.prvtkey_pem = server_key_start;

@@ -45,9 +45,9 @@ public:
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;
-    static constexpr uint32_t kInitialConnectTimeoutMs = 15000;
-    static constexpr uint32_t kAccessPointDelayMs = 30000;
-    static constexpr uint32_t kRetryIntervalMs = 120000;
+    static constexpr uint32_t kInitialConnectTimeoutMs = 8000;
+    static constexpr uint32_t kAccessPointDelayMs = 8000;
+    static constexpr uint32_t kRetryIntervalMs = 10000;
     static constexpr char kAccessPointSsid[] = "GPS-BaseStation";
 
     Storage *storage_ = nullptr;

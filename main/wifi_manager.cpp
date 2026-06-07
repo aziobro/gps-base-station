@@ -278,7 +278,9 @@ esp_err_t WifiManager::enable_access_point() {
     }
 
     access_point_active_ = true;
-    last_retry_ms_ = now_ms();
+    // The initial station attempt has already timed out. Retry promptly while
+    // the AP remains available instead of waiting through a long backoff.
+    last_retry_ms_ = now_ms() - kRetryIntervalMs;
     ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", kAccessPointSsid);
 
     const WifiCredentials credentials = storage_->load_wifi();
