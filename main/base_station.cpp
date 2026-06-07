@@ -188,7 +188,7 @@ void BaseStation::run() {
             rate_bytes = 0;
             rate_started = now;
         }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);
     }
     set_streams_suspended(true);
 }

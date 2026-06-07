@@ -4,7 +4,7 @@
 
 namespace config {
 
-inline constexpr char kFirmwareVersion[] = "2026.06.06-idf1";
+inline constexpr char kFirmwareVersion[] = "2026.06.07-idf2";
 
 inline constexpr uint32_t kSurveyMinTimeSec = 300;
 inline constexpr uint32_t kSurveyBlockTimeSec = 60;
