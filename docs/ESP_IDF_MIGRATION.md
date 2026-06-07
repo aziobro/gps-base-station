@@ -32,17 +32,27 @@ branch. Migration work is isolated on `codex/esp-idf-migration`.
 | `DNSServer` | lwIP UDP DNS responder |
 | Arduino loop | explicit FreeRTOS tasks and queues |
 
-## Migration Order
+## Current Status
 
-1. Boot, NVS, UART, partition table, logging
-2. UM980 command channel and RTCM receive task
-3. Stored position and survey engine
-4. Wi-Fi station/AP state machine and captive provisioning
-5. Local NTRIP caster and upstream NTRIP workers
-6. HTTP status/configuration API and pages
-7. OTA with rollback validation
-8. HTTPS certificate provisioning and HTTP-to-HTTPS redirect
-9. Hardware-in-the-loop validation before replacing the Arduino firmware
+- Native boot, logging, NVS compatibility, and UART drivers are complete.
+- UM980 base configuration and block-averaged survey logic are ported.
+- RTCM fan-out uses bounded queues and independent FreeRTOS network workers.
+- RTK2go v1, Onocoy v2, RTKdata v1, and the local caster are ported.
+- Wi-Fi station recovery, AP fallback, periodic reconnect, and AP scan are ported.
+- Authenticated status, configuration, sky plot, and OTA pages are ported.
+- OTA streams directly to flash and tolerates temporary receive timeouts.
+- Native rollback is enabled and application validation is delayed for 30 seconds.
+
+Still required before replacing production firmware:
+
+1. Install the native bootloader, partition table, and app over USB.
+2. Validate NVS compatibility, UART traffic, survey completion, all enabled
+   NTRIP connections, local caster output, AP recovery, and OTA rollback on
+   bench hardware.
+3. Add captive DNS if automatic portal pop-up remains desirable.
+4. Port the heading/yaw TCP NMEA path; that implementation is not present in
+   the current repository and therefore is not part of this native image yet.
+5. Add HTTPS certificate provisioning and HTTP-to-HTTPS redirect.
 
 ## Build
 
@@ -53,5 +63,10 @@ idf.py set-target esp32
 idf.py build
 ```
 
-Do not OTA this migration image until functional parity tests pass. The first
-native build is intentionally limited to NVS and both UM980 UARTs.
+Do not OTA this migration image onto the remote production unit. The native
+storage layer uses the same `gps_base` NVS namespace, key names, and value types
+as Arduino Preferences. The partition table is also identical to the deployed
+Arduino table because web OTA does not replace the partition table. That same
+limitation means an application-only framework migration cannot install the
+rollback-capable native bootloader; the first migration must be performed over
+USB on bench hardware.

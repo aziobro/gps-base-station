@@ -1,10 +1,26 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "base_station.cpp"
+        "local_caster.cpp"
+        "ntrip_push.cpp"
+        "storage.cpp"
+        "survey.cpp"
+        "um980.cpp"
+        "wifi_manager.cpp"
+        "web_server.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
         esp_driver_gpio
         esp_driver_uart
+        esp_event
+        esp_http_server
+        esp_netif
+        esp_system
+        esp_timer
+        esp_wifi
+        app_update
+        mbedtls
         nvs_flash
 )

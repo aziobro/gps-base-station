@@ -9,10 +9,10 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 - **Three simultaneous NTRIP push destinations** — RTK2go, Onocoy, RTKdata.online (each independently reconnecting via FreeRTOS task)
 - **Real-time stream buffering** — RTCM is batched into short 200 ms chunks; stale corrections are not queued while a provider reconnects
 - **Local NTRIP caster** — port 2101, up to 4 simultaneous rover clients on the local network
-- **Web status page** — live satellite counts, RTCM throughput (B/s, KB/min, MB/hr), per-service stats, WiFi signal strength
+- **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
 - **OTA firmware updates** — upload new firmware via the web interface, no USB required
-- **WiFi provisioning** — hotspot (AP) mode with captive portal and network scan if no WiFi is configured
+- **WiFi provisioning** — hotspot (AP) mode with network scan if no WiFi is configured
 - **NVS storage** — base position and credentials survive power cycles
 - **Password-protected web UI** — Basic Auth on all pages
 
@@ -55,18 +55,14 @@ COM1 TX/RX ◄──────────────── USB-C (direct PC 
 
 ---
 
-## Software Dependencies
+## Software
 
-Built with [PlatformIO](https://platformio.org/). All dependencies are part of the ESP32 Arduino framework — no additional libraries required.
+The migration branch is a native [ESP-IDF](https://github.com/espressif/esp-idf)
+v6.0.1 project. The production Arduino firmware remains available on `main`
+until hardware-in-the-loop validation is complete.
 
-| Library | Source |
-|---------|--------|
-| WiFi | ESP32 Arduino (built-in) |
-| WebServer | ESP32 Arduino (built-in) |
-| Preferences | ESP32 Arduino (built-in) |
-| Update (OTA) | ESP32 Arduino (built-in) |
-| DNSServer | ESP32 Arduino (built-in) |
-| FreeRTOS | ESP-IDF (built-in) |
+Native components use `esp_wifi`, `esp_http_server`, `esp_ota_ops`, NVS,
+FreeRTOS, and lwIP sockets directly.
 
 ---
 
@@ -74,38 +70,35 @@ Built with [PlatformIO](https://platformio.org/). All dependencies are part of t
 
 ### Prerequisites
 
-1. Install [PlatformIO](https://platformio.org/install) (VS Code extension or CLI)
-2. Clone this repository
+1. Install ESP-IDF v6.0.1.
+2. Clone this repository.
 
 ```bash
 git clone https://github.com/aziobro/gps-base-station.git
 cd gps-base-station
 ```
 
-### Configuration
-
-Runtime credentials should be configured through the web interface. For
-optional compile-time defaults, copy the ignored secrets template:
-
-```bash
-cp src/secrets.example.h src/secrets.h
-```
-
-Then edit `src/secrets.h`. Never commit that file; it is excluded by
-`.gitignore`.
-
-> Credentials committed in an earlier revision remain in Git history. Rotate
-> any exposed WiFi or service passwords before using the station.
+Runtime credentials are configured through the web interface and retained in
+the existing `gps_base` NVS namespace.
 
 ### First Flash (USB)
 
 ```bash
-pio run --target upload
+source .tools/esp-idf-v6.0.1/export.sh
+idf.py set-target esp32
+idf.py build
+idf.py flash monitor
 ```
 
 ### Subsequent Updates (OTA)
 
-Once the device is running and connected to WiFi, navigate to `http://<device-ip>/update` and upload the `.pio/build/esp32dev/firmware.bin` file.
+Once native firmware and its bootloader have been installed over USB, navigate
+to `http://<device-ip>/update` and upload `build/gps_base_station.bin`.
+
+> Do not use application-only OTA for the first Arduino-to-ESP-IDF migration.
+> OTA does not replace the Arduino bootloader, so native rollback support would
+> not yet be available. Install the native bootloader, partition table, and
+> application together over USB for the first migration.
 
 ---
 
@@ -116,7 +109,7 @@ Once the device is running and connected to WiFi, navigate to `http://<device-ip
 If no WiFi credentials are stored, the device starts in AP mode:
 
 1. Connect to the `GPS-BaseStation` WiFi network (open, no password)
-2. A captive portal will open automatically (or navigate to `http://192.168.4.1`)
+2. Navigate to `http://192.168.4.1`
 3. Click **Scan**, select your network, enter the password, and click **Connect**
 4. The device restarts and connects to your WiFi
 
@@ -229,11 +222,12 @@ UM980 COM3 ────────►│ Serial2 (DATA)  ──► localCaster 
                     └─────────────────────────────────────────┘
 ```
 
-Each NTRIP push client runs on its own FreeRTOS task (Core 0). The main Arduino loop (Core 1) enqueues RTCM packets non-blocking via a 12-packet queue per service. TCP connect, reconnect, and backoff logic runs entirely in the background.
+Each NTRIP push client runs on its own FreeRTOS task on Core 0. The native base
+station task on Core 1 enqueues RTCM packets non-blocking via a 12-packet queue
+per service. TCP connect, reconnect, and backoff logic runs in the background.
 
-Disabled or unconfigured providers do not allocate a task or queue. During OTA,
-active provider streams are suspended before flash writes begin; a failed OTA
-automatically resumes them.
+During OTA, active provider and local rover streams are suspended before flash
+writes begin; a failed OTA automatically resumes them.
 
 ---
 
@@ -253,17 +247,18 @@ automatically resumes them.
 ## File Structure
 
 ```
-src/
-├── config.h          — WiFi, NTRIP credentials, pin definitions, RTCM rates
-├── storage.h         — NVS persistence (base position, passwords, WiFi creds)
-├── um980.h           — UM980 initialisation commands (Serial1 / COM2)
-├── survey.h          — Self-averaging survey-in (Welford's algorithm + GNGSA parsing)
-├── ntrip_caster.h    — Local NTRIP server (port 2101, up to 4 rover clients)
-├── ntrip_client.h    — NTRIP push client with FreeRTOS task per service
-├── web_status.h      — HTTP web server (status, config, OTA, survey panel)
-├── wifi_manager.h    — WiFi connect with AP provisioning fallback
-└── main.cpp          — State machine: SURVEY → BASE_TX
-platformio.ini        — PlatformIO build configuration
+main/
+├── app_main.cpp       — native ESP-IDF startup
+├── base_station.*     — SURVEY to BASE_TX state machine and RTCM fan-out
+├── storage.*          — Arduino-compatible NVS persistence
+├── um980.*            — UM980 command channel
+├── survey.*           — block-averaged survey and satellite parsing
+├── local_caster.*     — local NTRIP caster
+├── ntrip_push.*       — isolated upstream NTRIP workers
+├── web_server.*       — authenticated status, config, sky plot, and OTA
+└── wifi_manager.*     — event-driven station/AP recovery
+partitions.csv         — Arduino-compatible flash layout
+sdkconfig.defaults     — native ESP-IDF configuration
 ```
 
 ---

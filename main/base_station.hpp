@@ -1,0 +1,92 @@
+#pragma once
+
+#include <atomic>
+#include <array>
+#include <cstdint>
+
+#include "driver/uart.h"
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
+#include "local_caster.hpp"
+#include "ntrip_push.hpp"
+#include "storage.hpp"
+#include "survey.hpp"
+#include "um980.hpp"
+
+enum class BaseMode {
+    kSurvey,
+    kTransmit,
+};
+
+struct BaseStationStatus {
+    BaseMode mode = BaseMode::kSurvey;
+    SurveySnapshot survey;
+    NtripStatus rtk2go;
+    NtripStatus onocoy;
+    NtripStatus rtkdata;
+    int local_clients = 0;
+    uint32_t rtcm_bytes_per_second = 0;
+    uint64_t rtcm_bytes_total = 0;
+};
+
+class BaseStation {
+public:
+    BaseStation(Storage &storage, uart_port_t command_uart, uart_port_t data_uart);
+    ~BaseStation();
+
+    esp_err_t start();
+    void stop();
+    esp_err_t request_survey();
+    esp_err_t request_position(double lat, double lon, double height);
+    void reload_services();
+    void set_streams_suspended(bool suspended);
+    bool healthy() const;
+
+    BaseStationStatus status() const;
+    size_t satellites(SatelliteInfo *output, size_t capacity) const;
+
+private:
+    enum class ActionType {
+        kSurvey,
+        kPosition,
+    };
+    struct Action {
+        ActionType type;
+        double lat;
+        double lon;
+        double height;
+    };
+
+    Storage &storage_;
+    uart_port_t command_uart_;
+    uart_port_t data_uart_;
+    Um980 receiver_;
+    SurveyManager survey_;
+    LocalCaster local_caster_;
+    NtripPushClient rtk2go_;
+    NtripPushClient onocoy_;
+    NtripPushClient rtkdata_;
+    QueueHandle_t actions_ = nullptr;
+    TaskHandle_t task_ = nullptr;
+    std::atomic<bool> stopping_{false};
+    std::atomic<bool> external_suspend_{false};
+    std::atomic<BaseMode> mode_{BaseMode::kSurvey};
+    std::atomic<uint32_t> rtcm_bps_{0};
+    std::atomic<uint64_t> rtcm_total_{0};
+    std::atomic<int64_t> heartbeat_us_{0};
+    std::array<uint8_t, 1024> rtcm_batch_{};
+    size_t rtcm_batch_length_ = 0;
+    int64_t rtcm_batch_started_us_ = 0;
+
+    static void task_entry(void *argument);
+    void run();
+    void handle_action(const Action &action);
+    void enter_survey(bool clear_position);
+    void enter_transmit(double lat, double lon, double height);
+    void apply_stream_state();
+    void read_command_uart();
+    void read_data_uart();
+};
