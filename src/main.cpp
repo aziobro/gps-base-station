@@ -86,6 +86,7 @@ void checkWiFi() {
 }
 
 void startBaseTx(double lat, double lon, double height) {
+    localCaster.suspendAndWait();
     if (rtk2go)  rtk2go->suspendAndWait();
     if (onocoy)  onocoy->suspendAndWait();
     if (rtkdata) rtkdata->suspendAndWait();
@@ -100,6 +101,7 @@ void startBaseTx(double lat, double lon, double height) {
     if (rtk2go)  rtk2go->resume();
     if (onocoy)  onocoy->resume();
     if (rtkdata) rtkdata->resume();
+    localCaster.resume();
     Serial.printf("[Main] Base TX mode. ntrip://%s:%d/%s\n",
                   WiFi.localIP().toString().c_str(), NTRIP_PORT, NTRIP_MOUNTPOINT);
 }
@@ -109,6 +111,7 @@ void startSurvey() {
     webStatus.setBaseTxMode(false);
     storage.clearPosition();
     // Wait for every worker to close before collecting a new base position.
+    localCaster.suspendAndWait();
     if (rtk2go)  rtk2go->suspendAndWait();
     if (onocoy)  onocoy->suspendAndWait();
     if (rtkdata) rtkdata->suspendAndWait();
@@ -207,7 +210,8 @@ void setup() {
         startBaseTx(lat, lon, hgt);
     });
     webStatus.onOtaStart([]() {
-        Serial.println("[Main] OTA starting - suspending upstream NTRIP streams.");
+        Serial.println("[Main] OTA starting - suspending all NTRIP streams.");
+        localCaster.suspendAndWait();
         if (rtk2go)  rtk2go->requestSuspend();
         if (onocoy)  onocoy->requestSuspend();
         if (rtkdata) rtkdata->requestSuspend();
@@ -215,7 +219,8 @@ void setup() {
     });
     webStatus.onOtaFinished([](bool success) {
         if (success) return;
-        Serial.println("[Main] OTA failed - resuming upstream NTRIP streams.");
+        Serial.println("[Main] OTA failed - resuming NTRIP streams.");
+        localCaster.resume();
         if (rtk2go)  rtk2go->resume();
         if (onocoy)  onocoy->resume();
         if (rtkdata) rtkdata->resume();

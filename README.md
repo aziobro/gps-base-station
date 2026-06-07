@@ -4,7 +4,7 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 
 ## Features
 
-- **Automated survey-in** — self-averaging position using Welford's algorithm (σ decreases as 1/√N)
+- **Automated survey-in** — one-minute block averaging avoids treating correlated fixes as independent
 - **Multi-constellation RTCM3** — GPS (1074), GLONASS (1084), Galileo (1094), BeiDou (1124) + base position (1005)
 - **Three simultaneous NTRIP push destinations** — RTK2go, Onocoy, RTKdata.online (each independently reconnecting via FreeRTOS task)
 - **Real-time stream buffering** — RTCM is batched into short 200 ms chunks; stale corrections are not queued while a provider reconnects
@@ -142,17 +142,18 @@ The web UI is password protected. On first access you'll be prompted to set an a
 On first boot (or after pressing **Start New Survey-in**), the device enters survey-in mode:
 
 1. The UM980 streams BESTPOS fixes every 5 seconds via COM2
-2. The ESP32 computes a running mean and an estimated precision of that mean using Welford's algorithm
-3. Survey completes when **both** conditions are met:
+2. The ESP32 computes a running mean and one-minute block means using Welford's algorithm
+3. Survey completes when all conditions are met:
    - Minimum 300 seconds elapsed
-   - 3D position σ ≤ 0.50 m
+   - At least 5 complete one-minute blocks collected
+   - 3D block-mean stability ≤ 0.50 m
 4. The converged position is saved to NVS flash
 5. The device automatically switches to Base TX mode
 
-The survey panel on the status page shows the estimated precision, satellite counts, and a convergence chart.
+The survey panel shows block-to-block position stability, satellite counts, and a convergence chart.
 
-> Consecutive GNSS fixes are correlated, so σ/√N can be optimistic and does
-> not establish survey-grade absolute coordinates. For high absolute accuracy,
+> Stability is not absolute accuracy. Autonomous averaging cannot remove common
+> GNSS biases and does not establish survey-grade absolute coordinates. For high absolute accuracy,
 > enter a professionally surveyed or externally post-processed position on the
 > configuration page.
 

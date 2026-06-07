@@ -25,14 +25,12 @@ struct SurveyResult {
 // ---------------------------------------------------------------------------
 // SurveyManager
 //
-// Collects BESTPOS fixes from the UM980 and computes the mean base position
-// and 3-D standard deviation using Welford's online algorithm.
+// Collects BESTPOS fixes from the UM980 and computes the mean base position.
 //
-// We do NOT rely on the UM980's internal CONFIG BASE TIME sigma output because
-// that field reports per-fix instantaneous accuracy (~2 m), not the mean's
-// standard deviation.  By averaging N fixes ourselves:
-//   σ_mean ≈ σ_single / √N
-// e.g. 2.1 m / √60 ≈ 0.27 m after the 300 s minimum at 5 s sample rate.
+// Consecutive GNSS fixes are strongly correlated, so treating every fix as an
+// independent sample produces false precision. Fixes are first averaged into
+// one-minute blocks; convergence measures agreement between completed block
+// means. This is a stability measurement, not absolute geodetic accuracy.
 // ---------------------------------------------------------------------------
 class SurveyManager {
 public:
@@ -51,6 +49,12 @@ public:
         _n = 0;
         _meanLat = _meanLon = _meanHgt = 0;
         _M2Lat   = _M2Lon   = _M2Hgt  = 0;
+        _blockIndex = UINT32_MAX;
+        _blockSamples = 0;
+        _blockSumLat = _blockSumLon = _blockSumHgt = 0;
+        _blockCount = 0;
+        _blockMeanLat = _blockMeanLon = _blockMeanHgt = 0;
+        _blockM2Lat = _blockM2Lon = _blockM2Hgt = 0;
 
         // Constellation counts
         _svGPS = _svGLO = _svGAL = _svBDS = 0;
@@ -83,8 +87,8 @@ public:
         _ser->println("LOG GBGSV ONTIME 10");
         delay(200);
 
-        Serial.printf("[Survey] Started (self-averaging). Min time: %ds, target σ: %.2fm\n",
-                      SURVEY_MIN_TIME, SURVEY_MAX_SIGMA);
+        Serial.printf("[Survey] Started. Min time: %ds, block: %ds, target stability: %.2fm\n",
+                      SURVEY_MIN_TIME, SURVEY_BLOCK_TIME, SURVEY_MAX_STABILITY);
     }
 
     void feed(uint8_t byte) {
@@ -151,12 +155,13 @@ public:
 
     struct LiveData {
         double   lat = 0, lon = 0, hgt = 0;   // current running mean
-        float    sigma = 0;                    // our computed 3-D σ of the mean
+        float    sigma = 0;                    // 3-D stability of block means
         float    sigmaInst = 0;                // per-fix σ from BESTPOS (info only)
         int      svUsed = 0, svTracked = 0;
         int      svGPS = 0, svGLO = 0, svGAL = 0, svBDS = 0;
         uint32_t elapsed = 0;
         int      samples = 0;
+        int      blocks = 0;
         bool     valid = false;
     };
 
@@ -185,6 +190,14 @@ private:
     double _meanLat, _meanLon, _meanHgt;
     double _M2Lat,   _M2Lon,   _M2Hgt;
 
+    // Block means reduce the effect of correlated consecutive fixes.
+    uint32_t _blockIndex = UINT32_MAX;
+    int      _blockSamples = 0;
+    double   _blockSumLat = 0, _blockSumLon = 0, _blockSumHgt = 0;
+    int      _blockCount = 0;
+    double   _blockMeanLat = 0, _blockMeanLon = 0, _blockMeanHgt = 0;
+    double   _blockM2Lat = 0, _blockM2Lon = 0, _blockM2Hgt = 0;
+
     // Per-constellation counts from GNGSA
     int _svGPS = 0, _svGLO = 0, _svGAL = 0, _svBDS = 0;
 
@@ -212,13 +225,26 @@ private:
         M2           += delta * delta2;
     }
 
-    // Standard deviation of the accumulated mean (σ / √n)
-    // Returns 9999 if n < 2.
+    // Standard error across completed block means.
     static float sigmaOfMean(double M2, int n) {
         if (n < 2) return 9999.f;
-        double variance = M2 / (n - 1);          // sample variance
-        double sigma    = sqrt(variance);         // per-fix std dev
-        return (float)(sigma / sqrt((double)n));  // std dev of the mean
+        double variance = M2 / (n - 1);
+        return (float)(sqrt(variance) / sqrt((double)n));
+    }
+
+    void commitBlock() {
+        if (_blockSamples == 0) return;
+
+        double lat = _blockSumLat / _blockSamples;
+        double lon = _blockSumLon / _blockSamples;
+        double hgt = _blockSumHgt / _blockSamples;
+        _blockCount++;
+        welfordUpdate(lat, _blockCount, _blockMeanLat, _blockM2Lat);
+        welfordUpdate(lon, _blockCount, _blockMeanLon, _blockM2Lon);
+        welfordUpdate(hgt, _blockCount, _blockMeanHgt, _blockM2Hgt);
+
+        _blockSamples = 0;
+        _blockSumLat = _blockSumLon = _blockSumHgt = 0;
     }
 
     // Convert lat/lon degree std-dev → metres
@@ -283,16 +309,31 @@ private:
         welfordUpdate(lon, _n, _meanLon, _M2Lon);
         welfordUpdate(hgt, _n, _meanHgt, _M2Hgt);
 
-        // Compute σ of the accumulated mean in 3-D metres
-        float sLat = sigmaOfMean(_M2Lat, _n);
-        float sLon = sigmaOfMean(_M2Lon, _n);
-        float sHgt = sigmaOfMean(_M2Hgt, _n);
-
-        float sLatM = degToM(sLat, lat);
-        float sLonM = lonDegToM(sLon, lat);
-        float sigma3d = sqrt(sLatM*sLatM + sLonM*sLonM + (float)(sHgt*sHgt));
-
         uint32_t elapsed = (millis() - _startMs) / 1000;
+        uint32_t blockIndex = elapsed / SURVEY_BLOCK_TIME;
+        if (_blockIndex == UINT32_MAX) {
+            _blockIndex = blockIndex;
+        } else if (blockIndex != _blockIndex) {
+            commitBlock();
+            _blockIndex = blockIndex;
+        }
+        _blockSumLat += lat;
+        _blockSumLon += lon;
+        _blockSumHgt += hgt;
+        _blockSamples++;
+
+        float sLatM = 9999.f;
+        float sLonM = 9999.f;
+        float sHgt = 9999.f;
+        float stability3d = 9999.f;
+        if (_blockCount >= 2) {
+            float sLat = sigmaOfMean(_blockM2Lat, _blockCount);
+            float sLon = sigmaOfMean(_blockM2Lon, _blockCount);
+            sHgt = sigmaOfMean(_blockM2Hgt, _blockCount);
+            sLatM = degToM(sLat, lat);
+            sLonM = lonDegToM(sLon, lat);
+            stability3d = sqrt(sLatM*sLatM + sLonM*sLonM + sHgt*sHgt);
+        }
 
         // Build constellation string
         char svBuf[48] = "";
@@ -300,9 +341,10 @@ private:
             snprintf(svBuf, sizeof(svBuf), "  GPS:%d GLO:%d GAL:%d BDS:%d",
                      _svGPS, _svGLO, _svGAL, _svBDS);
 
-        Serial.printf("[Survey] %us  n=%d  σ_mean=%.4fm  σ_inst=%.3fm  svs=%d/%d%s\n"
+        Serial.printf("[Survey] %us  n=%d blocks=%d stability=%.4fm  σ_inst=%.3fm  svs=%d/%d%s\n"
                       "         mean: lat=%.8f  lon=%.8f  hgt=%.3f\n",
-                      elapsed, _n, sigma3d, instSig, svUsed, svTrkd, svBuf,
+                      elapsed, _n, _blockCount, stability3d, instSig,
+                      svUsed, svTrkd, svBuf,
                       _meanLat, _meanLon, _meanHgt);
 
         // Assign fields explicitly for compatibility across Arduino-ESP32
@@ -310,7 +352,7 @@ private:
         _live.lat = _meanLat;
         _live.lon = _meanLon;
         _live.hgt = _meanHgt;
-        _live.sigma = sigma3d;
+        _live.sigma = stability3d;
         _live.sigmaInst = instSig;
         _live.svUsed = svUsed;
         _live.svTracked = svTrkd;
@@ -320,11 +362,12 @@ private:
         _live.svBDS = _svBDS;
         _live.elapsed = elapsed;
         _live.samples = _n;
+        _live.blocks = _blockCount;
         _live.valid = true;
 
-        // Push our computed sigma to history (skip first sample — sigma is undefined)
-        if (_n >= 2) {
-            _histBuf[(_historyHead + _historyCount) % HISTORY_SIZE] = { elapsed, sigma3d };
+        // Push stability to history once at least two blocks exist.
+        if (_blockCount >= 2) {
+            _histBuf[(_historyHead + _historyCount) % HISTORY_SIZE] = { elapsed, stability3d };
             if (_historyCount < HISTORY_SIZE) {
                 _historyCount++;
             } else {
@@ -332,11 +375,11 @@ private:
             }
         }
 
-        // Convergence check on our own σ
-        bool timeOk  = elapsed >= (uint32_t)SURVEY_MIN_TIME;
-        bool sigmaOk = _n >= 2 && sigma3d <= SURVEY_MAX_SIGMA;
+        bool timeOk = elapsed >= (uint32_t)SURVEY_MIN_TIME;
+        bool blocksOk = _blockCount >= SURVEY_MIN_BLOCKS;
+        bool stabilityOk = blocksOk && stability3d <= SURVEY_MAX_STABILITY;
 
-        if (timeOk && sigmaOk) {
+        if (timeOk && stabilityOk) {
             _result.lat        = _meanLat;
             _result.lon        = _meanLon;
             _result.height     = _meanHgt;
@@ -349,8 +392,8 @@ private:
             _ser->println("UNLOGALL THISPORT");
 
             Serial.printf("[Survey] DONE after %us (%d samples). "
-                          "Mean: %.8f, %.8f, %.4f  σ3D=%.4fm\n",
-                          elapsed, _n, _meanLat, _meanLon, _meanHgt, sigma3d);
+                          "Mean: %.8f, %.8f, %.4f  stability3D=%.4fm\n",
+                          elapsed, _n, _meanLat, _meanLon, _meanHgt, stability3d);
         }
     }
 

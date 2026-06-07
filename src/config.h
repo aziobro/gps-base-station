@@ -1,6 +1,6 @@
 #pragma once
 
-#define FIRMWARE_VERSION "2026.06.06-review3"
+#define FIRMWARE_VERSION "2026.06.06-review4"
 
 // Copy secrets.example.h to secrets.h for optional compile-time defaults.
 // Runtime values saved through the web UI take precedence.
@@ -64,8 +64,10 @@
 // =============================================================================
 // Survey-in
 // =============================================================================
-#define SURVEY_MIN_TIME   300    // minimum collection time in seconds (5 min)
-#define SURVEY_MAX_SIGMA  0.50f  // maximum position std-dev in metres to accept
+#define SURVEY_MIN_TIME       300    // minimum collection time in seconds (5 min)
+#define SURVEY_BLOCK_TIME      60    // average fixes into one-minute blocks
+#define SURVEY_MIN_BLOCKS       5    // completed blocks required for acceptance
+#define SURVEY_MAX_STABILITY 0.50f  // maximum 3-D block-mean stability in metres
 
 // =============================================================================
 // UM980 Serial ports

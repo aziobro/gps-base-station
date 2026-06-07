@@ -297,9 +297,10 @@ stPoll();
   <table id='sv-table'>
     <tr><td>Elapsed</td><td id='sv-elapsed'>—</td></tr>
     <tr><td>Samples collected</td><td id='sv-samples'>—</td></tr>
-    <tr><td>Mean position σ (3D)</td><td id='sv-sigma'>—</td></tr>
+    <tr><td>Completed 1-minute blocks</td><td id='sv-blocks'>—</td></tr>
+    <tr><td>Block-mean stability (3D)</td><td id='sv-sigma'>—</td></tr>
     <tr><td>Per-fix σ (instantaneous)</td><td id='sv-sigma-inst'>—</td></tr>
-    <tr><td>Target σ</td><td id='sv-target'>—</td></tr>
+    <tr><td>Target stability</td><td id='sv-target'>—</td></tr>
     <tr><td>Mean Latitude</td><td id='sv-lat'>—</td></tr>
     <tr><td>Mean Longitude</td><td id='sv-lon'>—</td></tr>
     <tr><td>Mean Height (m)</td><td id='sv-hgt'>—</td></tr>
@@ -382,9 +383,10 @@ function pollSurvey(){
     if(d.state!='collecting') return;
     document.getElementById('sv-elapsed').textContent = fmtTime(d.elapsed);
     document.getElementById('sv-samples').textContent = d.samples;
+    document.getElementById('sv-blocks').textContent = d.blocks;
     var sigEl = document.getElementById('sv-sigma');
-    sigEl.textContent = d.sigma.toFixed(4)+' m';
-    sigEl.style.color = d.sigma <= d.target_sigma ? '#0f0' : '#fa0';
+    sigEl.textContent = d.blocks < 2 ? 'waiting for 2 blocks' : d.sigma.toFixed(4)+' m';
+    sigEl.style.color = d.blocks >= 2 && d.sigma <= d.target_sigma ? '#0f0' : '#fa0';
     document.getElementById('sv-sigma-inst').textContent = d.sigma_inst.toFixed(3)+' m';
     document.getElementById('sv-target').textContent = d.target_sigma.toFixed(2)+' m';
     document.getElementById('sv-lat').textContent = d.lat.toFixed(8);
@@ -631,6 +633,8 @@ pollSurvey();
     // OTA firmware update
     // -------------------------------------------------------------------------
     bool _updateError = false;
+    bool _updateComplete = false;
+    String _updateErrorMessage;
 
     void handleUpdateGet() {
         if (!checkAuth()) return;
@@ -656,11 +660,14 @@ pollSurvey();
 
         if (upload.status == UPLOAD_FILE_START) {
             _updateError = false;
+            _updateComplete = false;
+            _updateErrorMessage = "";
             if (_otaStartCallback) _otaStartCallback();
             Serial.printf("[OTA] Receiving: %s (%u bytes expected)\n",
                           upload.filename.c_str(), upload.totalSize);
             if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                 _updateError = true;
+                _updateErrorMessage = Update.errorString();
                 Serial.printf("[OTA] begin() error: %s\n", Update.errorString());
             }
 
@@ -668,6 +675,7 @@ pollSurvey();
             if (!_updateError) {
                 if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
                     _updateError = true;
+                    _updateErrorMessage = Update.errorString();
                     Serial.printf("[OTA] write() error: %s\n", Update.errorString());
                 }
             }
@@ -676,22 +684,33 @@ pollSurvey();
             if (!_updateError) {
                 if (!Update.end(true)) {
                     _updateError = true;
+                    _updateErrorMessage = Update.errorString();
                     Serial.printf("[OTA] end() error: %s\n", Update.errorString());
                 } else {
+                    _updateComplete = true;
                     Serial.printf("[OTA] Flash complete (%u bytes). Restarting.\n",
                                   upload.totalSize);
                 }
             }
+        } else if (upload.status == UPLOAD_FILE_ABORTED) {
+            Update.abort();
+            _updateError = true;
+            _updateComplete = false;
+            _updateErrorMessage = "Upload was interrupted before completion.";
+            Serial.println("[OTA] Upload aborted.");
         }
     }
 
     void handleUpdateComplete() {
         if (!checkAuth()) return;
-        if (_updateError) {
+        if (_updateError || !_updateComplete) {
+            if (_updateErrorMessage.length() == 0) {
+                _updateErrorMessage = "No complete firmware image was received.";
+            }
             if (_otaFinishedCallback) _otaFinishedCallback(false);
             _server.send(500, "text/html", page("OTA Failed",
                 "<h2>Update Failed</h2>"
-                "<p class='err'>" + String(Update.errorString()) + "</p>"
+                "<p class='err'>" + _updateErrorMessage + "</p>"
                 "<p><a href='/update'>Try again</a></p>"));
         } else {
             if (_otaFinishedCallback) _otaFinishedCallback(true);
@@ -727,13 +746,14 @@ pollSurvey();
         json += ",\"sigma\":"        + String(d.sigma, 4);
         json += ",\"sigma_inst\":"   + String(d.sigmaInst, 4);
         json += ",\"samples\":"      + String(d.samples);
+        json += ",\"blocks\":"       + String(d.blocks);
         json += ",\"svs_used\":"     + String(d.svUsed);
         json += ",\"svs_tracked\":"  + String(d.svTracked);
         json += ",\"gps\":"          + String(d.svGPS);
         json += ",\"glo\":"          + String(d.svGLO);
         json += ",\"gal\":"          + String(d.svGAL);
         json += ",\"bds\":"          + String(d.svBDS);
-        json += ",\"target_sigma\":" + String(SURVEY_MAX_SIGMA, 2);
+        json += ",\"target_sigma\":" + String(SURVEY_MAX_STABILITY, 2);
 
         // Sigma history array
         SurveyManager::HistorySample hist[SurveyManager::HISTORY_SIZE];

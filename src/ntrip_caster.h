@@ -48,7 +48,7 @@ public:
 
     // Non-blocking. Network writes are performed by the Core 0 worker.
     void update(const uint8_t *rtcmBuf, size_t len) {
-        if (!_queue || !rtcmBuf || len == 0) return;
+        if (!_queue || _suspendRequested || _suspended || !rtcmBuf || len == 0) return;
 
         Packet pkt;
         pkt.len = (uint16_t)min(len, (size_t)MAX_PKT_BYTES);
@@ -63,6 +63,24 @@ public:
 
     int clientCount() const { return _clientCount; }
 
+    void requestSuspend() {
+        _suspendRequested = true;
+    }
+
+    bool suspendAndWait(uint32_t timeoutMs = 2000) {
+        if (!_taskHandle) return true;
+        requestSuspend();
+        uint32_t started = millis();
+        while (!_suspended && millis() - started < timeoutMs) {
+            delay(10);
+        }
+        return _suspended;
+    }
+
+    void resume() {
+        _suspendRequested = false;
+    }
+
 private:
     WiFiServer *_server = nullptr;
     WiFiClient _clients[MAX_CLIENTS];
@@ -70,6 +88,8 @@ private:
     TaskHandle_t _taskHandle = nullptr;
     volatile int _clientCount = 0;
     volatile bool _resetClients = false;
+    volatile bool _suspendRequested = false;
+    volatile bool _suspended = false;
 
     static void taskEntry(void *arg) {
         static_cast<NtripCaster *>(arg)->run();
@@ -78,6 +98,17 @@ private:
     void run() {
         Packet pkt;
         while (true) {
+            if (_suspendRequested) {
+                stopAllClients();
+                xQueueReset(_queue);
+                _suspended = true;
+                while (_suspendRequested) {
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                }
+                _suspended = false;
+                continue;
+            }
+
             if (_resetClients) {
                 stopAllClients();
                 xQueueReset(_queue);
