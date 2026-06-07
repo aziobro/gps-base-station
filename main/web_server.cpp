@@ -116,7 +116,7 @@ bool parse_double(const std::string &text, double &value) {
 }
 
 void restart_task(void *) {
-    vTaskDelay(pdMS_TO_TICKS(750));
+    vTaskDelay(pdMS_TO_TICKS(2500));
     esp_restart();
 }
 
@@ -135,6 +135,10 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.send_wait_timeout = 10;
     tls_config.httpd.lru_purge_enable = true;
     tls_config.httpd.max_open_sockets = 2;
+    tls_config.httpd.keep_alive_enable = true;
+    tls_config.httpd.keep_alive_idle = 30;
+    tls_config.httpd.keep_alive_interval = 5;
+    tls_config.httpd.keep_alive_count = 3;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
     tls_config.prvtkey_pem = server_key_start;
@@ -513,7 +517,6 @@ esp_err_t AdminWebServer::wifi_scan_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -563,7 +566,6 @@ esp_err_t AdminWebServer::skyplot_data_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -649,7 +651,6 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"position_valid\":" + (position.valid ? "true" : "false") + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -741,7 +742,14 @@ esp_err_t AdminWebServer::update_upload_handler(httpd_req_t *request) {
             request, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(result));
     }
 
-    httpd_resp_sendstr(request, "Update accepted. Restarting.");
+    httpd_resp_set_hdr(request, "Connection", "close");
+    const esp_err_t response_result =
+        httpd_resp_sendstr(request, "Update accepted. Restarting.");
+    if (response_result != ESP_OK) {
+        ESP_LOGW(
+            kTag, "OTA response could not be flushed: %s",
+            esp_err_to_name(response_result));
+    }
     xTaskCreate(restart_task, "ota_restart", 2048, nullptr, 3, nullptr);
     return ESP_OK;
 }
@@ -866,7 +874,6 @@ esp_err_t AdminWebServer::send_page(
     httpd_resp_set_type(request, "text/html");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "Strict-Transport-Security", "max-age=3600");
-    httpd_resp_set_hdr(request, "Connection", "close");
     esp_err_t result = send_chunks(request, kPrefix);
     if (result == ESP_OK) result = send_chunks(request, title);
     if (result == ESP_OK) result = send_chunks(request, kAfterTitle);
