@@ -42,7 +42,9 @@ private:
 
     bool authorize(httpd_req_t *request) const;
     esp_err_t send_unauthorized(httpd_req_t *request) const;
-    esp_err_t send_html(httpd_req_t *request, const std::string &body) const;
+    esp_err_t send_page(
+        httpd_req_t *request, const char *title,
+        const std::string &content) const;
 
     static AdminWebServer *self(httpd_req_t *request);
     static std::string read_body(httpd_req_t *request, size_t max_length);

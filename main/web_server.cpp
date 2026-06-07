@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 #include "base_station.hpp"
@@ -37,21 +38,15 @@ extern const unsigned char ca_cert_start[]
 extern const unsigned char ca_cert_end[]
     asm("_binary_ca_cert_pem_end");
 
-std::string page(const char *title, const std::string &content) {
-    return "<!doctype html><html><head><meta charset='utf-8'>"
-           "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-           "<link rel='icon' href='data:,'>"
-           "<title>" + std::string(title) + "</title><style>"
-           "body{font-family:monospace;background:#111;color:#cfc;padding:1em;"
-           "max-width:720px;margin:auto}h1,h2{color:#0f0}"
-           "table{border-collapse:collapse;width:100%}td{border:1px solid #333;"
-           "padding:6px}input{width:100%;max-width:420px;padding:7px;"
-           "background:#1a1a1a;color:#cfc;border:1px solid #444;box-sizing:border-box}"
-           "button{padding:8px 16px;background:#1a1a1a;color:#0f0;"
-           "border:1px solid #0f0}.ok{color:#0f0}.warn{color:#fa0}.err{color:#f44}"
-           ".dim{opacity:.6}"
-           "a{color:#0d0}</style></head><body><h1>GPS Base Station</h1>" +
-           content + "</body></html>";
+esp_err_t send_chunks(httpd_req_t *request, std::string_view data) {
+    constexpr size_t kChunkSize = 1024;
+    for (size_t offset = 0; offset < data.size(); offset += kChunkSize) {
+        const size_t length = std::min(kChunkSize, data.size() - offset);
+        const esp_err_t result =
+            httpd_resp_send_chunk(request, data.data() + offset, length);
+        if (result != ESP_OK) return result;
+    }
+    return ESP_OK;
 }
 
 std::string human_bytes(uint64_t bytes) {
@@ -69,7 +64,8 @@ std::string human_bytes(uint64_t bytes) {
     return text;
 }
 
-std::string escape_html_text(const std::string &value) {
+
+std::string escape_html(const std::string &value) {
     std::string out;
     for (char c : value) {
         if (c == '&') out += "&amp;";
@@ -86,7 +82,7 @@ std::string service_html(const NtripStatus &status) {
     if (!status.enabled) return "<span class='warn'>disabled</span>";
     const char *css = status.connected ? "ok" : "err";
     const std::string label =
-        status.connected ? "connected" : escape_html_text(status.message);
+        status.connected ? "connected" : escape_html(status.message);
     return "<span class='" + std::string(css) + "'>" + label + "</span>"
            " <span class='dim'>| " + human_bytes(status.bytes_sent) +
            " sent | " + std::to_string(status.dropped_batches) +
@@ -137,6 +133,8 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 10;
     tls_config.httpd.send_wait_timeout = 10;
+    tls_config.httpd.lru_purge_enable = true;
+    tls_config.httpd.max_open_sockets = 2;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
     tls_config.prvtkey_pem = server_key_start;
@@ -151,23 +149,39 @@ esp_err_t AdminWebServer::start(
     http_config.server_port = 80;
     http_config.ctrl_port = 32768;
     http_config.max_uri_handlers = 3;
+    http_config.max_open_sockets = 1;
+    http_config.backlog_conn = 1;
+    http_config.stack_size = 4096;
+    http_config.lru_purge_enable = true;
     http_config.uri_match_fn = httpd_uri_match_wildcard;
-    ESP_RETURN_ON_ERROR(
-        httpd_start(&http_server_, &http_config), kTag, "HTTP gateway failed");
-
-    const httpd_uri_t gateway_get{
-        "/*", HTTP_GET, http_gateway_handler, this};
-    const httpd_uri_t gateway_post{
-        "/*", HTTP_POST, http_gateway_handler, this};
-    ESP_RETURN_ON_ERROR(
-        httpd_register_uri_handler(http_server_, &gateway_get),
-        kTag, "HTTP GET gateway registration failed");
-    ESP_RETURN_ON_ERROR(
-        httpd_register_uri_handler(http_server_, &gateway_post),
-        kTag, "HTTP POST gateway registration failed");
+    esp_err_t gateway_result = httpd_start(&http_server_, &http_config);
+    if (gateway_result == ESP_OK) {
+        const httpd_uri_t gateway_get{
+            "/*", HTTP_GET, http_gateway_handler, this};
+        const httpd_uri_t gateway_post{
+            "/*", HTTP_POST, http_gateway_handler, this};
+        gateway_result =
+            httpd_register_uri_handler(http_server_, &gateway_get);
+        if (gateway_result == ESP_OK) {
+            gateway_result =
+                httpd_register_uri_handler(http_server_, &gateway_post);
+        }
+    }
+    if (gateway_result != ESP_OK) {
+        ESP_LOGW(
+            kTag, "HTTP recovery gateway unavailable: %s",
+            esp_err_to_name(gateway_result));
+        if (http_server_) {
+            httpd_stop(http_server_);
+            http_server_ = nullptr;
+        }
+    }
 
     ESP_LOGI(kTag, "HTTPS administration server listening on port 443");
-    ESP_LOGI(kTag, "HTTP redirect/AP provisioning gateway listening on port 80");
+    if (http_server_) {
+        ESP_LOGI(
+            kTag, "HTTP redirect/AP provisioning gateway listening on port 80");
+    }
     return ESP_OK;
 }
 
@@ -246,6 +260,7 @@ esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
         request, HTTPD_404_NOT_FOUND,
         "Only WiFi provisioning is available over HTTP");
 }
+
 
 esp_err_t AdminWebServer::ca_certificate_handler(httpd_req_t *request) {
     httpd_resp_set_type(request, "application/x-x509-ca-cert");
@@ -366,7 +381,7 @@ async function refresh(){
 }
 setTimeout(refresh,15000);
 </script>)HTML";
-    return server->send_html(request, page("GPS Base Station", content));
+    return server->send_page(request, "GPS Base Station", content);
 }
 
 esp_err_t AdminWebServer::setup_get_handler(httpd_req_t *request) {
@@ -384,7 +399,7 @@ esp_err_t AdminWebServer::setup_get_handler(httpd_req_t *request) {
         "<p><input name='confirm' type='password' minlength='8' "
         "placeholder='Confirm password' required></p>"
         "<button>Set Password</button></form>";
-    return server->send_html(request, page("Setup", content));
+    return server->send_page(request, "Setup", content);
 }
 
 esp_err_t AdminWebServer::setup_post_handler(httpd_req_t *request) {
@@ -475,7 +490,7 @@ esp_err_t AdminWebServer::config_get_handler(httpd_req_t *request) {
         "o.appendChild(p)});};"
         "</script>"
         "<p><a href='/'>Back</a></p>";
-    return server->send_html(request, page("Configuration", content));
+    return server->send_page(request, "Configuration", content);
 }
 
 esp_err_t AdminWebServer::wifi_scan_handler(httpd_req_t *request) {
@@ -498,6 +513,7 @@ esp_err_t AdminWebServer::wifi_scan_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -526,7 +542,7 @@ function draw(a){
 async function update(){try{draw(await (await fetch('/skyplot/data')).json())}catch(e){}}
 update();setInterval(update,10000);
 </script>)HTML";
-    return server->send_html(request, page("Satellite Sky Plot", content));
+    return server->send_page(request, "Satellite Sky Plot", content);
 }
 
 esp_err_t AdminWebServer::skyplot_data_handler(httpd_req_t *request) {
@@ -547,6 +563,7 @@ esp_err_t AdminWebServer::skyplot_data_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -609,7 +626,7 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"wifi_connected\":" + (server->wifi_->connected() ? "true" : "false") +
         ",\"ap_active\":" + (server->wifi_->access_point_active() ? "true" : "false") +
         ",\"ssid\":\"" + json_escape(server->wifi_->ssid()) +
-        ",\"ip\":\"" + json_escape(server->wifi_->ip_address()) +
+        "\",\"ip\":\"" + json_escape(server->wifi_->ip_address()) +
         "\",\"rssi\":" + std::to_string(server->wifi_->rssi()) +
         ",\"free_heap\":" + std::to_string(free_heap) +
         ",\"heap_total\":" +
@@ -629,12 +646,10 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"rtk2go\":" + provider_json(station.rtk2go) +
         ",\"onocoy\":" + provider_json(station.onocoy) +
         ",\"rtkdata\":" + provider_json(station.rtkdata) +
-        ",\"rtk2go_bytes\":" + std::to_string(station.rtk2go.bytes_sent) +
-        ",\"onocoy_bytes\":" + std::to_string(station.onocoy.bytes_sent) +
-        ",\"rtkdata_bytes\":" + std::to_string(station.rtkdata.bytes_sent) +
         ",\"position_valid\":" + (position.valid ? "true" : "false") + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -661,13 +676,16 @@ document.getElementById('upload').onclick=async function(){
   }catch(e){out.textContent='Upload failed: '+e;}
 };
 </script><p><a href='/'>Back</a></p>)HTML";
-    return server->send_html(request, page("Firmware Update", content));
+    return server->send_page(request, "Firmware Update", content);
 }
 
 esp_err_t AdminWebServer::update_upload_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
     server->station_->set_streams_suspended(true);
+    // Let the streaming tasks release TCP buffers before the TLS upload and
+    // flash writer compete for the ESP32's remaining heap.
+    vTaskDelay(pdMS_TO_TICKS(1100));
     if (request->content_len <= 0) {
         server->station_->set_streams_suspended(false);
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Empty image");
@@ -820,14 +838,42 @@ esp_err_t AdminWebServer::send_unauthorized(httpd_req_t *request) const {
     httpd_resp_set_status(request, "401 Unauthorized");
     httpd_resp_set_hdr(
         request, "WWW-Authenticate", "Basic realm=\"GPS Base Station\"");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_sendstr(request, "Authentication required");
 }
 
-esp_err_t AdminWebServer::send_html(
-    httpd_req_t *request, const std::string &body) const {
+esp_err_t AdminWebServer::send_page(
+    httpd_req_t *request, const char *title,
+    const std::string &content) const {
+    static constexpr std::string_view kPrefix =
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<link rel='icon' href='data:,'><title>";
+    static constexpr std::string_view kAfterTitle =
+        "</title><style>"
+        "body{font-family:monospace;background:#111;color:#cfc;padding:1em;"
+        "max-width:720px;margin:auto}h1,h2{color:#0f0}"
+        "table{border-collapse:collapse;width:100%}td{border:1px solid #333;"
+        "padding:6px}input{width:100%;max-width:420px;padding:7px;"
+        "background:#1a1a1a;color:#cfc;border:1px solid #444;"
+        "box-sizing:border-box}"
+        "button{padding:8px 16px;background:#1a1a1a;color:#0f0;"
+        "border:1px solid #0f0}.ok{color:#0f0}.warn{color:#fa0}"
+        ".err{color:#f44}.dim{opacity:.6}a{color:#0d0}"
+        "</style></head><body><h1>GPS Base Station</h1>";
+    static constexpr std::string_view kSuffix = "</body></html>";
+
     httpd_resp_set_type(request, "text/html");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, body.c_str(), body.size());
+    httpd_resp_set_hdr(request, "Strict-Transport-Security", "max-age=3600");
+    httpd_resp_set_hdr(request, "Connection", "close");
+    esp_err_t result = send_chunks(request, kPrefix);
+    if (result == ESP_OK) result = send_chunks(request, title);
+    if (result == ESP_OK) result = send_chunks(request, kAfterTitle);
+    if (result == ESP_OK) result = send_chunks(request, content);
+    if (result == ESP_OK) result = send_chunks(request, kSuffix);
+    if (result == ESP_OK) result = httpd_resp_send_chunk(request, nullptr, 0);
+    return result;
 }
 
 AdminWebServer *AdminWebServer::self(httpd_req_t *request) {
@@ -842,10 +888,15 @@ std::string AdminWebServer::read_body(
     }
     std::string body(request->content_len, '\0');
     size_t offset = 0;
+    int consecutive_timeouts = 0;
     while (offset < body.size()) {
         int result = httpd_req_recv(
             request, body.data() + offset, body.size() - offset);
+        if (result == HTTPD_SOCK_ERR_TIMEOUT && consecutive_timeouts++ < 20) {
+            continue;
+        }
         if (result <= 0) return {};
+        consecutive_timeouts = 0;
         offset += result;
     }
     return body;
