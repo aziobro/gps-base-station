@@ -11,6 +11,7 @@
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -22,6 +23,19 @@ namespace {
 
 constexpr char kTag[] = "web";
 constexpr char kAdminUser[] = "admin";
+
+extern const unsigned char server_cert_start[]
+    asm("_binary_server_cert_pem_start");
+extern const unsigned char server_cert_end[]
+    asm("_binary_server_cert_pem_end");
+extern const unsigned char server_key_start[]
+    asm("_binary_server_key_pem_start");
+extern const unsigned char server_key_end[]
+    asm("_binary_server_key_pem_end");
+extern const unsigned char ca_cert_start[]
+    asm("_binary_ca_cert_pem_start");
+extern const unsigned char ca_cert_end[]
+    asm("_binary_ca_cert_pem_end");
 
 std::string page(const char *title, const std::string &content) {
     return "<!doctype html><html><head><meta charset='utf-8'>"
@@ -60,13 +74,46 @@ esp_err_t AdminWebServer::start(
     wifi_ = &wifi;
     station_ = &station;
 
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 20;
-    config.stack_size = 8192;
-    config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 10;
-    ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), kTag, "HTTP start failed");
+    httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
+    tls_config.httpd.max_uri_handlers = 20;
+    tls_config.httpd.stack_size = 12288;
+    tls_config.httpd.recv_wait_timeout = 10;
+    tls_config.httpd.send_wait_timeout = 10;
+    tls_config.servercert = server_cert_start;
+    tls_config.servercert_len = server_cert_end - server_cert_start;
+    tls_config.prvtkey_pem = server_key_start;
+    tls_config.prvtkey_len = server_key_end - server_key_start;
+    ESP_RETURN_ON_ERROR(
+        httpd_ssl_start(&https_server_, &tls_config),
+        kTag, "HTTPS start failed");
+    ESP_RETURN_ON_ERROR(
+        register_secure_handlers(), kTag, "HTTPS URI registration failed");
 
+    httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
+    http_config.server_port = 80;
+    http_config.ctrl_port = 32768;
+    http_config.max_uri_handlers = 3;
+    http_config.uri_match_fn = httpd_uri_match_wildcard;
+    ESP_RETURN_ON_ERROR(
+        httpd_start(&http_server_, &http_config), kTag, "HTTP gateway failed");
+
+    const httpd_uri_t gateway_get{
+        "/*", HTTP_GET, http_gateway_handler, this};
+    const httpd_uri_t gateway_post{
+        "/*", HTTP_POST, http_gateway_handler, this};
+    ESP_RETURN_ON_ERROR(
+        httpd_register_uri_handler(http_server_, &gateway_get),
+        kTag, "HTTP GET gateway registration failed");
+    ESP_RETURN_ON_ERROR(
+        httpd_register_uri_handler(http_server_, &gateway_post),
+        kTag, "HTTP POST gateway registration failed");
+
+    ESP_LOGI(kTag, "HTTPS administration server listening on port 443");
+    ESP_LOGI(kTag, "HTTP redirect/AP provisioning gateway listening on port 80");
+    return ESP_OK;
+}
+
+esp_err_t AdminWebServer::register_secure_handlers() {
     const httpd_uri_t handlers[] = {
         {"/", HTTP_GET, root_handler, this},
         {"/setup", HTTP_GET, setup_get_handler, this},
@@ -82,21 +129,75 @@ esp_err_t AdminWebServer::start(
         {"/config/position", HTTP_POST, position_handler, this},
         {"/survey", HTTP_POST, survey_handler, this},
         {"/config/wifi", HTTP_POST, wifi_handler, this},
+        {"/ca.crt", HTTP_GET, ca_certificate_handler, this},
     };
     for (const auto &handler : handlers) {
         ESP_RETURN_ON_ERROR(
-            httpd_register_uri_handler(server_, &handler),
+            httpd_register_uri_handler(https_server_, &handler),
             kTag, "URI registration failed");
     }
-
-    ESP_LOGI(kTag, "Native administration server listening on port 80");
     return ESP_OK;
 }
 
 void AdminWebServer::stop() {
-    if (!server_) return;
-    httpd_stop(server_);
-    server_ = nullptr;
+    if (http_server_) {
+        httpd_stop(http_server_);
+        http_server_ = nullptr;
+    }
+    if (https_server_) {
+        httpd_ssl_stop(https_server_);
+        https_server_ = nullptr;
+    }
+}
+
+esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (request->method == HTTP_GET &&
+        std::string(request->uri) == "/ca.crt") {
+        return ca_certificate_handler(request);
+    }
+    if (!server->wifi_->access_point_active()) {
+        char host[96]{};
+        if (httpd_req_get_hdr_value_str(
+                request, "Host", host, sizeof(host)) != ESP_OK ||
+            host[0] == '\0') {
+            strlcpy(host, "gps-base.local", sizeof(host));
+        }
+        if (char *port = strchr(host, ':')) *port = '\0';
+        const std::string location =
+            "https://" + std::string(host) + request->uri;
+        httpd_resp_set_status(request, "308 Permanent Redirect");
+        httpd_resp_set_hdr(request, "Location", location.c_str());
+        httpd_resp_set_type(request, "text/plain");
+        return httpd_resp_sendstr(request, "Redirecting to HTTPS");
+    }
+
+    const std::string uri = request->uri;
+    if (request->method == HTTP_GET) {
+        if (uri == "/") return root_handler(request);
+        if (uri == "/setup") return setup_get_handler(request);
+        if (uri == "/config") return config_get_handler(request);
+        if (uri == "/wifi/scan") return wifi_scan_handler(request);
+        if (uri == "/status") return status_handler(request);
+        if (uri == "/ca.crt") return ca_certificate_handler(request);
+    } else if (request->method == HTTP_POST) {
+        if (uri == "/setup") return setup_post_handler(request);
+        if (uri == "/config/wifi") return wifi_handler(request);
+    }
+    return httpd_resp_send_err(
+        request, HTTPD_404_NOT_FOUND,
+        "Only WiFi provisioning is available over HTTP");
+}
+
+esp_err_t AdminWebServer::ca_certificate_handler(httpd_req_t *request) {
+    httpd_resp_set_type(request, "application/x-x509-ca-cert");
+    httpd_resp_set_hdr(
+        request, "Content-Disposition",
+        "attachment; filename=\"gps-base-ca.crt\"");
+    httpd_resp_set_hdr(request, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(
+        request, reinterpret_cast<const char *>(ca_cert_start),
+        ca_cert_end - ca_cert_start - 1);
 }
 
 esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {

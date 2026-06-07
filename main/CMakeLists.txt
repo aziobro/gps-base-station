@@ -16,6 +16,7 @@ idf_component_register(
         esp_driver_uart
         esp_event
         esp_http_server
+        esp_https_server
         esp_netif
         esp_system
         esp_timer
@@ -23,4 +24,8 @@ idf_component_register(
         app_update
         mbedtls
         nvs_flash
+    EMBED_TXTFILES
+        "certs/server-cert.pem"
+        "certs/server-key.pem"
+        "certs/ca-cert.pem"
 )

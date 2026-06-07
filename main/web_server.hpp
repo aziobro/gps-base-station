@@ -19,8 +19,10 @@ private:
     Storage *storage_ = nullptr;
     WifiManager *wifi_ = nullptr;
     BaseStation *station_ = nullptr;
-    httpd_handle_t server_ = nullptr;
+    httpd_handle_t https_server_ = nullptr;
+    httpd_handle_t http_server_ = nullptr;
 
+    esp_err_t register_secure_handlers();
     static esp_err_t root_handler(httpd_req_t *request);
     static esp_err_t setup_get_handler(httpd_req_t *request);
     static esp_err_t setup_post_handler(httpd_req_t *request);
@@ -35,6 +37,8 @@ private:
     static esp_err_t position_handler(httpd_req_t *request);
     static esp_err_t survey_handler(httpd_req_t *request);
     static esp_err_t wifi_handler(httpd_req_t *request);
+    static esp_err_t http_gateway_handler(httpd_req_t *request);
+    static esp_err_t ca_certificate_handler(httpd_req_t *request);
 
     bool authorize(httpd_req_t *request) const;
     esp_err_t send_unauthorized(httpd_req_t *request) const;

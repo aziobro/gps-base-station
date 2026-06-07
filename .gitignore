@@ -22,3 +22,6 @@ sdkconfig.old
 
 # Local credentials
 src/secrets.h
+
+# Device-local HTTPS credentials (generate with tools/generate-https-certs.sh)
+main/certs/*.pem

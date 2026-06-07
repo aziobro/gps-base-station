@@ -11,7 +11,8 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 - **Local NTRIP caster** — port 2101, up to 4 simultaneous rover clients on the local network
 - **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
-- **OTA firmware updates** — upload new firmware via the web interface, no USB required
+- **HTTPS administration** — TLS-protected status, configuration, sky plot, and OTA pages
+- **OTA firmware updates** — upload new firmware via HTTPS, no USB required
 - **WiFi provisioning** — hotspot (AP) mode with network scan if no WiFi is configured
 - **NVS storage** — base position and credentials survive power cycles
 - **Password-protected web UI** — Basic Auth on all pages
@@ -61,7 +62,7 @@ The migration branch is a native [ESP-IDF](https://github.com/espressif/esp-idf)
 v6.0.1 project. The production Arduino firmware remains available on `main`
 until hardware-in-the-loop validation is complete.
 
-Native components use `esp_wifi`, `esp_http_server`, `esp_ota_ops`, NVS,
+Native components use `esp_wifi`, `esp_https_server`, `esp_ota_ops`, NVS,
 FreeRTOS, and lwIP sockets directly.
 
 ---
@@ -81,6 +82,16 @@ cd gps-base-station
 Runtime credentials are configured through the web interface and retained in
 the existing `gps_base` NVS namespace.
 
+Generate a device-local certificate authority and server certificate before
+the first build:
+
+```bash
+./tools/generate-https-certs.sh
+```
+
+The generated private keys in `main/certs/` are ignored by Git. Back them up
+securely if future firmware must continue using the same trusted certificate.
+
 ### First Flash (USB)
 
 ```bash
@@ -93,7 +104,7 @@ idf.py flash monitor
 ### Subsequent Updates (OTA)
 
 Once native firmware and its bootloader have been installed over USB, navigate
-to `http://<device-ip>/update` and upload `build/gps_base_station.bin`.
+to `https://<device-ip>/update` and upload `build/gps_base_station.bin`.
 
 > Do not use application-only OTA for the first Arduino-to-ESP-IDF migration.
 > OTA does not replace the Arduino bootloader, so native rollback support would
@@ -115,16 +126,31 @@ If no WiFi credentials are stored, the device starts in AP mode:
 
 ### Web Interface
 
-Once connected, find the device IP from your router or the serial monitor output. Navigate to:
+Once connected, find the device IP from your router or the serial monitor
+output. HTTP requests redirect to HTTPS, except while AP fallback is active.
 
 | URL | Description |
 |-----|-------------|
-| `http://<ip>/` | Status page — live satellite counts, RTCM throughput, service status |
-| `http://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
-| `http://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
-| `http://<ip>/update` | OTA firmware update |
+| `https://<ip>/` | Status page — live satellite counts, RTCM throughput, service status |
+| `https://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
+| `https://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
+| `https://<ip>/update` | OTA firmware update |
+| `http://<ip>/ca.crt` | Download the local CA certificate |
 
 The web UI is password protected. On first access you'll be prompted to set an admin password.
+
+### Trusting HTTPS
+
+The ESP32 uses a project-local certificate authority because public
+certificate services cannot validate a private LAN address.
+
+1. Download `http://<device-ip>/ca.crt`.
+2. Import it into the operating system trust store as a trusted root.
+3. Open `https://<device-ip>/`.
+
+The generated server certificate covers `gps-base.local`, `192.168.8.195`,
+and the fallback AP address `192.168.4.1`. The hostname requires local DNS or
+a hosts-file entry if the network does not resolve `.local` names.
 
 ---
 
@@ -218,7 +244,8 @@ UM980 COM3 ────────►│ Serial2 (DATA)  ──► localCaster 
                     │                  ├──► Onocoy task ──────►│──► servers.onocoy.com
                     │                  └──► RTKdata task ─────►│──► rtkdata.online
                     │                                          │
-                    │  WebServer (port 80) ◄───────────────────│◄── Browser
+                    │ HTTPS admin (443) ◄──────────────────────│◄── Browser
+                    │ HTTP redirect/AP setup (80)              │
                     └─────────────────────────────────────────┘
 ```
 
@@ -240,6 +267,7 @@ writes begin; a failed OTA automatically resumes them.
 | NTRIP service shows "TCP connect failed" | Wrong host/port, or server down | Check credentials in `/config` |
 | NTRIP shows "rejected: ICY 401" | Wrong password | Re-enter password in `/config` |
 | Web page not responding | Device overloaded or WiFi drop | Wait ~15 s; device auto-reconnects |
+| Browser reports untrusted HTTPS | Local CA not installed | Download `/ca.crt` over HTTP and trust it |
 | OTA upload fails | Firmware too large | Check Flash: line in build output — must be under 100% |
 
 ---
