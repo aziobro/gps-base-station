@@ -11,7 +11,8 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 - **Local NTRIP caster** — port 2101, up to 8 simultaneous rover clients on the local network
 - **SD card file browser** — browse, download, rename, delete, and create directories via the web UI; `logs/` and `rawdata/` directories created automatically on first mount
 - **SD card storage stats** — used / free / total displayed on both the status page and file browser with a visual progress bar
-- **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, and SD card storage
+- **RINEX raw data collection** — toggle from the status page to record raw GNSS observations (30-second epochs, 1-hour files) to `/sdcard/rawdata/` in RINEX 3.03 format for post-processing with OPUS or similar services; multi-file merge download built in
+- **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, SD card storage, and RINEX collection status
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
 - **HTTPS administration** — TLS-protected status, configuration, sky plot, SD card, and OTA pages
 - **OTA firmware updates** — upload new firmware via HTTPS, no USB required after initial flash
@@ -155,7 +156,7 @@ Once connected, find the device IP from your router or the serial monitor output
 | `https://<ip>/` | Status page — satellite counts, RTCM throughput, service status, SD card stats |
 | `https://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
 | `https://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
-| `https://<ip>/files` | SD card file browser — browse, download, create folders, rename, delete |
+| `https://<ip>/files` | SD card file browser — browse, download, create folders, rename, delete; select multiple `.rnx` files to merge & download |
 | `https://<ip>/update` | OTA firmware update |
 | `http://<ip>/ca.crt` | Download the local CA certificate |
 
@@ -208,6 +209,30 @@ Once a position is stored, the device:
 | 1124 | BeiDou MSM4 | Every 1 s |
 
 Typical throughput: **~850–950 B/s** (~7 kbps) with good satellite visibility.
+
+---
+
+## RINEX Raw Data Collection
+
+The base station can record raw GNSS observations in **RINEX 3.03** format for post-processing with services such as [OPUS](https://geodesy.noaa.gov/OPUS/) (NOAA Online Positioning User Service) to obtain a more accurate absolute base position than autonomous survey-in can provide.
+
+### How it works
+
+1. Click **Start** next to the *RINEX collection* row on the status page
+2. COM3 switches from RTCM binary output to ASCII `RANGEA` (raw observations) at 30-second intervals — RTCM push to RTK2go, Onocoy, and RTKdata is automatically suspended while collecting
+3. One-hour files are written to `/sdcard/rawdata/` named `BASE_YYYYMMDD_HHMMSS.rnx`
+4. Click **Stop** to close the current file and restore full RTCM output
+5. Navigate to **SD card files → rawdata**, select two or more `.rnx` files, and click **Merge & Download** to receive a single merged RINEX file
+
+### Uploading to OPUS
+
+OPUS accepts RINEX 2.x and 3.x observation files. For best results:
+
+- Collect at least **4 hours** of data (2 hours minimum for OPUS Static)
+- The GPS L1 + L2 dual-frequency observations written by this firmware are compatible with both OPUS Static and OPUS Rapid Static
+- The APPROX POSITION XYZ in the file header is set from the current survey-in position; OPUS computes the precise position independently
+
+Once OPUS returns a result, enter the precise latitude, longitude, and ellipsoidal height on the **/config** page under **Manual Position** and click **Save Position** — the base will immediately reconfigure to broadcast corrections from that surveyed location.
 
 ---
 
@@ -283,6 +308,9 @@ During OTA, active provider and local rover streams are suspended before flash w
 | OTA upload fails | Firmware too large | Check Flash line in build output — must be under 100% |
 | SD card shows "not mounted" | LDO channel 4 not enabled | Verify firmware version ≥ ota18 |
 | SD card shows "calculating…" | `statvfs` not supported on FATFS | Verify firmware version ≥ ota22 (uses `esp_vfs_fat_info`) |
+| RTK2go bans the device IP | Connected before UM980 was tracking | Verify firmware version ≥ ota23 — NTRIP clients now wait for first RTCM batch |
+| RINEX collection won't start | Device not in Base TX mode | Complete survey-in or set a manual position first |
+| RINEX file has no observations | UM980 not tracking satellites | Wait for satellite lock before starting collection |
 
 ---
 
@@ -298,7 +326,8 @@ main/
 ├── local_caster.*     — local NTRIP caster (port 2101, up to 8 clients)
 ├── ntrip_push.*       — isolated upstream NTRIP workers (RTK2go, Onocoy, RTKdata)
 ├── sd_manager.*       — microSD via SDSPI (LDO enable, mount, browse, disk stats)
-├── web_server.*       — authenticated status, config, sky plot, SD browser, OTA
+├── rinex_logger.*     — RINEX 3.03 observation file writer (RANGEA parser, 30 s epochs, hourly rotation)
+├── web_server.*       — authenticated status, config, sky plot, SD browser, RINEX toggle, OTA
 └── wifi_manager.*     — event-driven station/AP recovery
 partitions.csv         — OTA flash layout (ota_0 / ota_1 / otadata)
 sdkconfig.defaults     — ESP-IDF kconfig overrides (socket pool, lwIP tuning)

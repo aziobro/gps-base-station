@@ -12,6 +12,7 @@
 
 #include "local_caster.hpp"
 #include "ntrip_push.hpp"
+#include "rinex_logger.hpp"
 #include "storage.hpp"
 #include "survey.hpp"
 #include "um980.hpp"
@@ -41,17 +42,21 @@ public:
     void stop();
     esp_err_t request_survey();
     esp_err_t request_position(double lat, double lon, double height);
+    esp_err_t request_raw_collection(bool enable);
     void reload_services();
     void set_streams_suspended(bool suspended);
     bool healthy() const;
 
     BaseStationStatus status() const;
+    RinexLogger::Status rinex_status() const { return rinex_logger_.status(); }
     size_t satellites(SatelliteInfo *output, size_t capacity) const;
 
 private:
     enum class ActionType {
         kSurvey,
         kPosition,
+        kStartRaw,
+        kStopRaw,
     };
     struct Action {
         ActionType type;
@@ -69,10 +74,13 @@ private:
     NtripPushClient rtk2go_;
     NtripPushClient onocoy_;
     NtripPushClient rtkdata_;
+    RinexLogger rinex_logger_;
     QueueHandle_t actions_ = nullptr;
     TaskHandle_t task_ = nullptr;
     std::atomic<bool> stopping_{false};
     std::atomic<bool> external_suspend_{false};
+    std::atomic<bool> has_rtcm_data_{false};
+    std::atomic<bool> raw_collection_{false};
     std::atomic<BaseMode> mode_{BaseMode::kSurvey};
     std::atomic<uint32_t> rtcm_bps_{0};
     std::atomic<uint64_t> rtcm_total_{0};
@@ -86,7 +94,10 @@ private:
     void handle_action(const Action &action);
     void enter_survey(bool clear_position);
     void enter_transmit(double lat, double lon, double height);
+    void enter_raw_collection();
+    void exit_raw_collection();
     void apply_stream_state();
     void read_command_uart();
     void read_data_uart();
+    void read_data_uart_raw();
 };

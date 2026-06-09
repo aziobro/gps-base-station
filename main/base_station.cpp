@@ -86,6 +86,14 @@ esp_err_t BaseStation::request_survey() {
         ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+esp_err_t BaseStation::request_raw_collection(bool enable) {
+    if (!actions_) return ESP_ERR_INVALID_STATE;
+    const ActionType t = enable ? ActionType::kStartRaw : ActionType::kStopRaw;
+    const Action action{t, 0, 0, 0};
+    return xQueueSend(actions_, &action, 0) == pdTRUE
+        ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
 esp_err_t BaseStation::request_position(
     double lat, double lon, double height) {
     if (!actions_) return ESP_ERR_INVALID_STATE;
@@ -176,6 +184,8 @@ void BaseStation::run() {
                     ESP_LOGE(kTag, "Survey position could not be saved");
                 }
             }
+        } else if (raw_collection_) {
+            read_data_uart_raw();
         } else {
             const uint64_t before = rtcm_total_;
             read_data_uart();
@@ -197,9 +207,19 @@ void BaseStation::run() {
 
 void BaseStation::handle_action(const Action &action) {
     if (action.type == ActionType::kSurvey) {
+        if (raw_collection_) exit_raw_collection();
         enter_survey(true);
         return;
     }
+    if (action.type == ActionType::kStartRaw) {
+        enter_raw_collection();
+        return;
+    }
+    if (action.type == ActionType::kStopRaw) {
+        exit_raw_collection();
+        return;
+    }
+    if (raw_collection_) exit_raw_collection();
     if (storage_.save_position(
             action.lat, action.lon, action.height) != ESP_OK) {
         ESP_LOGE(kTag, "Manual position could not be saved");
@@ -210,6 +230,7 @@ void BaseStation::handle_action(const Action &action) {
 
 void BaseStation::enter_survey(bool clear_position) {
     mode_ = BaseMode::kSurvey;
+    has_rtcm_data_ = false;
     apply_stream_state();
     if (clear_position) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.clear_position());
@@ -223,6 +244,7 @@ void BaseStation::enter_survey(bool clear_position) {
 
 void BaseStation::enter_transmit(double lat, double lon, double height) {
     mode_ = BaseMode::kTransmit;
+    has_rtcm_data_ = false;
     survey_.reset();
     uart_flush_input(data_uart_);
     rtcm_batch_length_ = 0;
@@ -231,9 +253,40 @@ void BaseStation::enter_transmit(double lat, double lon, double height) {
     ESP_LOGI(kTag, "Base transmission mode");
 }
 
+void BaseStation::enter_raw_collection() {
+    if (mode_ != BaseMode::kTransmit) {
+        ESP_LOGW(kTag, "Raw collection requires Base TX mode");
+        return;
+    }
+    if (raw_collection_) return;
+    raw_collection_ = true;
+    apply_stream_state();  // suspend all NTRIP/local streams
+    uart_flush_input(data_uart_);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_raw_output());
+    const BasePosition pos = storage_.load_position();
+    rinex_logger_.start(pos.lat, pos.lon, pos.height);
+    ESP_LOGI(kTag, "Raw collection mode entered");
+}
+
+void BaseStation::exit_raw_collection() {
+    if (!raw_collection_) return;
+    rinex_logger_.stop();
+    raw_collection_ = false;
+    uart_flush_input(data_uart_);
+    // Restore RTCM output; has_rtcm_data_ is reset so streams stay suspended
+    // until the first RTCM batch arrives (prevents empty connections to RTK2go).
+    const BasePosition pos = storage_.load_position();
+    has_rtcm_data_ = false;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        receiver_.configure_base(pos.lat, pos.lon, pos.height));
+    apply_stream_state();
+    ESP_LOGI(kTag, "Raw collection mode exited, RTCM restored");
+}
+
 void BaseStation::apply_stream_state() {
     const bool suspended =
-        external_suspend_ || mode_ != BaseMode::kTransmit;
+        external_suspend_ || mode_ != BaseMode::kTransmit ||
+        !has_rtcm_data_ || raw_collection_;
     local_caster_.set_suspended(suspended);
     rtk2go_.set_suspended(suspended);
     onocoy_.set_suspended(suspended);
@@ -248,6 +301,14 @@ void BaseStation::read_command_uart() {
             command_uart_, buffer, sizeof(buffer), 0);
         if (received > 0) survey_.feed(buffer, received);
     } while (received == static_cast<int>(sizeof(buffer)));
+}
+
+void BaseStation::read_data_uart_raw() {
+    uint8_t buf[256];
+    int n;
+    while ((n = uart_read_bytes(data_uart_, buf, sizeof(buf), 0)) > 0) {
+        rinex_logger_.feed(buf, n);
+    }
 }
 
 void BaseStation::read_data_uart() {
@@ -265,6 +326,9 @@ void BaseStation::read_data_uart() {
     if (rtcm_batch_length_ < rtcm_batch_.size() &&
         esp_timer_get_time() - rtcm_batch_started_us_ < kRtcmBatchUs) {
         return;
+    }
+    if (!has_rtcm_data_.exchange(true)) {
+        apply_stream_state();  // first RTCM batch — unsuspend push clients
     }
     local_caster_.push(rtcm_batch_.data(), rtcm_batch_length_);
     rtk2go_.push(rtcm_batch_.data(), rtcm_batch_length_);

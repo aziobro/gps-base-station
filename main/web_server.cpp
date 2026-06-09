@@ -218,6 +218,8 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/files/delete", HTTP_POST, files_delete_handler, this},
         {"/files/rename", HTTP_POST, files_rename_handler, this},
         {"/files/mkdir", HTTP_POST, files_mkdir_handler, this},
+        {"/rinex/toggle", HTTP_POST, rinex_toggle_handler, this},
+        {"/files/rinex_merge", HTTP_GET, files_rinex_merge_handler, this},
     };
     for (const auto &handler : handlers) {
         ESP_RETURN_ON_ERROR(
@@ -404,6 +406,22 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
                 std::to_string(pct) + "%)</span>";
         }() +
         "</td></tr>"
+        "<tr><td>RINEX collection</td><td id='st-rinex'>" +
+        [&]() {
+            const auto rs = server->station_->rinex_status();
+            if (!rs.active) {
+                return std::string("<span class='dim'>inactive</span>"
+                    " &nbsp; <button onclick=\"toggleRinex(true)\">Start</button>");
+            }
+            const std::string fname = rs.current_file.empty() ? "" :
+                rs.current_file.substr(rs.current_file.rfind('/') + 1);
+            return std::string("<span class='ok'>active</span>"
+                " <span class='dim'>| epochs: ") + std::to_string(rs.epochs) +
+                (fname.empty() ? "" : " | " + html_escape(fname)) +
+                "</span>"
+                " &nbsp; <button onclick=\"toggleRinex(false)\">Stop</button>";
+        }() +
+        "</td></tr>"
         "</table><p><a href='/config'>Configuration</a> &nbsp; "
         "<a href='/skyplot'>Sky plot</a> &nbsp; "
         "<a href='/files'>SD card files</a> &nbsp; "
@@ -439,7 +457,13 @@ async function refresh(){
   if(!d.sd_mounted){set('st-sd',"<span class='err'>not mounted</span>");}
   else if(!d.sd_total){set('st-sd',"<span class='ok'>mounted</span>");}
   else{const sp=Math.round(d.sd_used*100/d.sd_total),sc=sp<80?'ok':sp<95?'warn':'err';set('st-sd',"<span class='"+sc+"'>"+bytes(d.sd_used)+" used of "+bytes(d.sd_total)+" ("+sp+"%)</span>");}
+  if(!d.rinex_active){set('st-rinex',"<span class='dim'>inactive</span> &nbsp; <button onclick=\"toggleRinex(true)\">Start</button>");}
+  else{const fn=d.rinex_file?d.rinex_file.split('/').pop():'';set('st-rinex',"<span class='ok'>active</span> <span class='dim'>| epochs: "+d.rinex_epochs+(fn?" | "+fn:"")+"</span> &nbsp; <button onclick=\"toggleRinex(false)\">Stop</button>");}
  }catch(e){}finally{statusRequest=false;setTimeout(refresh,15000);}
+}
+async function toggleRinex(start){
+ try{await fetch('/rinex/toggle',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'start='+(start?'1':'0')});}catch(e){}
+ setTimeout(refresh,500);
 }
 setTimeout(refresh,15000);
 </script>)HTML";
@@ -727,6 +751,14 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
             return std::string(",\"sd_mounted\":") + (m ? "true" : "false") +
                 ",\"sd_total\":" + std::to_string(ds.total_bytes) +
                 ",\"sd_used\":"  + std::to_string(ds.used_bytes);
+        }() +
+        [&]() {
+            const auto rs = server->station_->rinex_status();
+            return std::string(",\"rinex_active\":") +
+                (rs.active ? "true" : "false") +
+                ",\"rinex_epochs\":" + std::to_string(rs.epochs) +
+                ",\"rinex_files\":"  + std::to_string(rs.files) +
+                ",\"rinex_file\":\"" + json_escape(rs.current_file) + "\"";
         }() + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
@@ -1126,16 +1158,18 @@ esp_err_t AdminWebServer::files_page_handler(httpd_req_t *request) {
         storage_block +
         "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap'>"
         "<div id='breadcrumb' style='color:#888;word-break:break-all;flex:1'>/</div>"
+        "<button id='merge-btn' onclick='mergeSelected()' style='display:none;padding:3px 10px;background:#1a1a1a;color:#08f;border:1px solid #08f;cursor:pointer;white-space:nowrap'>&#8659; Merge &amp; Download</button>"
         "<button id='mkdir-btn' onclick='mkdirPrompt()' style='padding:3px 10px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer;white-space:nowrap'>+ New Folder</button>"
         "</div>"
         "<div style='overflow-x:auto'>"
         "<table><thead><tr>"
+        "<th style='text-align:left;padding:4px 8px;width:18px' id='sel-th'></th>"
         "<th style='text-align:left;padding:4px 8px'>Name</th>"
         "<th style='text-align:right;padding:4px 8px'>Size</th>"
         "<th style='text-align:right;padding:4px 8px'>Actions</th>"
         "</tr></thead>"
         "<tbody id='file-list'>"
-        "<tr><td colspan='3' style='padding:10px 8px;color:#888'>Loading&hellip;</td></tr>"
+        "<tr><td colspan='4' style='padding:10px 8px;color:#888'>Loading&hellip;</td></tr>"
         "</tbody></table></div>"
         "<script>var SD_ROOT='" + mount + "';</script>"
         R"JSEOF(
@@ -1144,6 +1178,7 @@ var filePath=SD_ROOT;
 var fileEntries=[];
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fmtSize(b){if(b===0)return'<span style="color:#888">Folder</span>';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
+function isRnx(name){return name.toLowerCase().endsWith('.rnx');}
 function breadcrumb(path){
   var parts=path.split('/').filter(function(p){return p.length>0;});
   var html='<span style="color:#555">/ </span>';var built='';
@@ -1153,23 +1188,36 @@ function breadcrumb(path){
   });
   document.getElementById('breadcrumb').innerHTML=html;
 }
+function updateMergeBtn(){
+  var checked=document.querySelectorAll('.rnx-cb:checked');
+  var btn=document.getElementById('merge-btn');
+  if(btn)btn.style.display=checked.length>=2?'':'none';
+}
 function loadDir(path){
   filePath=path;breadcrumb(path);
   var tb=document.getElementById('file-list');
-  tb.innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
+  tb.innerHTML='<tr><td colspan="4" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
+  var mergeBtn=document.getElementById('merge-btn');
+  if(mergeBtn)mergeBtn.style.display='none';
   fetch('/files/list?path='+encodeURIComponent(path))
     .then(function(r){return r.json();}).then(function(entries){
       fileEntries=entries.sort(function(a,b){
         if(a.is_dir!==b.is_dir)return a.is_dir?-1:1;
         return a.name<b.name?-1:a.name>b.name?1:0;
       });
+      var hasRnx=fileEntries.some(function(e){return!e.is_dir&&isRnx(e.name);});
+      var selTh=document.getElementById('sel-th');
+      if(selTh)selTh.style.display=hasRnx?'':'none';
       var rows='';
       if(path!==SD_ROOT){
         var parent=path.substring(0,path.lastIndexOf('/'))||SD_ROOT;
-        rows+='<tr><td colspan="3" style="padding:5px 8px"><a href="#" onclick="loadDir(\''+esc(parent)+'\');return false" style="color:#0d0">&#8679; ..</a></td></tr>';
+        rows+='<tr><td></td><td colspan="3" style="padding:5px 8px"><a href="#" onclick="loadDir(\''+esc(parent)+'\');return false" style="color:#0d0">&#8679; ..</a></td></tr>';
       }
-      if(!fileEntries.length){rows+='<tr><td colspan="3" style="padding:10px 8px;color:#888">Empty directory</td></tr>';}
+      if(!fileEntries.length){rows+='<tr><td colspan="4" style="padding:10px 8px;color:#888">Empty directory</td></tr>';}
       fileEntries.forEach(function(e,i){
+        var cbCell=(!e.is_dir&&isRnx(e.name))
+          ?'<input type="checkbox" class="rnx-cb" data-path="'+esc(e.path)+'" onchange="updateMergeBtn()" style="cursor:pointer">'
+          :'';
         var nameCell=e.is_dir
           ?'<a href="#" onclick="loadDir(fileEntries['+i+'].path);return false" style="color:#0d0">[dir] '+esc(e.name)+'</a>'
           :'[file] '+esc(e.name);
@@ -1177,16 +1225,24 @@ function loadDir(path){
         if(!e.is_dir)acts+='<button onclick="dlFile('+i+')" title="Download" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer">dl</button>';
         acts+='<button onclick="renameEntry('+i+')" title="Rename" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#fa0;border:1px solid #fa0;cursor:pointer">rn</button>';
         acts+='<button onclick="delEntry('+i+')" title="Delete" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#f44;border:1px solid #f44;cursor:pointer">del</button>';
-        rows+='<tr style="border-bottom:1px solid #222"><td style="padding:6px 8px">'+nameCell+'</td>'
+        rows+='<tr style="border-bottom:1px solid #222">'
+          +'<td style="padding:6px 4px;text-align:center">'+cbCell+'</td>'
+          +'<td style="padding:6px 8px">'+nameCell+'</td>'
           +'<td style="padding:6px 8px;text-align:right;color:#888">'+fmtSize(e.size)+'</td>'
           +'<td style="padding:6px 4px;text-align:right;white-space:nowrap">'+acts+'</td></tr>';
       });
       tb.innerHTML=rows;
     }).catch(function(){
-      document.getElementById('file-list').innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#f44">Failed to load directory</td></tr>';
+      document.getElementById('file-list').innerHTML='<tr><td colspan="4" style="padding:10px 8px;color:#f44">Failed to load directory</td></tr>';
     });
 }
 function dlFile(i){window.location.href='/files/download?path='+encodeURIComponent(fileEntries[i].path);}
+function mergeSelected(){
+  var cbs=document.querySelectorAll('.rnx-cb:checked');
+  if(cbs.length<2){alert('Select at least 2 RINEX files to merge.');return;}
+  var params=Array.from(cbs).map(function(cb){return'f='+encodeURIComponent(cb.getAttribute('data-path'));}).join('&');
+  window.location.href='/files/rinex_merge?'+params;
+}
 function renameEntry(i){
   var e=fileEntries[i];
   var n=prompt('Rename "'+e.name+'" to:',e.name);
@@ -1322,4 +1378,106 @@ esp_err_t AdminWebServer::files_mkdir_handler(httpd_req_t *request) {
     const bool ok = mkdir(path.c_str(), 0755) == 0;
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"mkdir failed\"}");
+}
+
+// POST /rinex/toggle — body: start=1 or start=0
+esp_err_t AdminWebServer::rinex_toggle_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const std::string body  = read_body(request, 64);
+    const std::string start = form_value(body, "start");
+    const bool enable = (start == "1" || start == "true");
+    const esp_err_t err = server->station_->request_raw_collection(enable);
+    httpd_resp_set_type(request, "application/json");
+    if (err != ESP_OK) {
+        return httpd_resp_sendstr(request, "{\"ok\":false}");
+    }
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
+}
+
+// GET /files/rinex_merge?f=path1&f=path2...
+// Streams a merged RINEX file: header from the first file, then observation
+// epochs from all files (skipping subsequent headers).
+esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    // Collect all 'f' query parameters.
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen == 0) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "No files");
+    }
+    std::string qbuf(qlen + 1, '\0');
+    if (httpd_req_get_url_query_str(request, qbuf.data(), qbuf.size()) != ESP_OK) {
+        return httpd_resp_send_err(
+            request, HTTPD_400_BAD_REQUEST, "Query parse failed");
+    }
+
+    std::vector<std::string> paths;
+    size_t pos = 0;
+    while (pos < qbuf.size()) {
+        size_t eq = qbuf.find('=', pos);
+        if (eq == std::string::npos) break;
+        const std::string key = qbuf.substr(pos, eq - pos);
+        size_t amp = qbuf.find('&', eq + 1);
+        if (amp == std::string::npos) amp = qbuf.size();
+        if (key == "f") {
+            const std::string val =
+                url_decode(qbuf.substr(eq + 1, amp - eq - 1));
+            if (!val.empty() && SdManager::safe_path(val.c_str())) {
+                paths.push_back(val);
+            }
+        }
+        pos = amp + 1;
+    }
+    if (paths.empty()) {
+        return httpd_resp_send_err(
+            request, HTTPD_400_BAD_REQUEST, "No valid files");
+    }
+
+    httpd_resp_set_type(request, "application/octet-stream");
+    httpd_resp_set_hdr(request, "Content-Disposition",
+                       "attachment; filename=\"merged.rnx\"");
+
+    char buf[1024];
+    bool header_sent = false;
+
+    for (const std::string &path : paths) {
+        FILE *f = fopen(path.c_str(), "r");
+        if (!f) continue;
+
+        if (!header_sent) {
+            // Stream the entire first file (header + observations).
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+                if (httpd_resp_send_chunk(
+                        request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
+                    fclose(f);
+                    goto done;
+                }
+            }
+            header_sent = true;
+        } else {
+            // Skip lines until END OF HEADER, then stream the rest.
+            bool past_header = false;
+            while (fgets(buf, sizeof(buf), f)) {
+                if (!past_header) {
+                    if (strstr(buf, "END OF HEADER")) past_header = true;
+                    continue;
+                }
+                const size_t n = strlen(buf);
+                if (httpd_resp_send_chunk(
+                        request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
+                    fclose(f);
+                    goto done;
+                }
+            }
+        }
+        fclose(f);
+    }
+
+done:
+    httpd_resp_send_chunk(request, nullptr, 0);
+    return ESP_OK;
 }

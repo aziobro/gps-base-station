@@ -68,6 +68,15 @@ esp_err_t Um980::configure_survey_output() {
     return configure_satellite_output();
 }
 
+esp_err_t Um980::configure_raw_output() {
+    ESP_RETURN_ON_ERROR(command("UNLOGALL COM3"), kTag, "COM3 stop failed");
+    // RANGEA every 30 seconds — keep satellite status on COM2.
+    ESP_RETURN_ON_ERROR(
+        command("LOG COM3 RANGEA ONTIME 30"), kTag, "RANGEA log failed");
+    ESP_LOGI(kTag, "COM3 switched to RANGEA (raw collection mode)");
+    return ESP_OK;
+}
+
 esp_err_t Um980::configure_base(double lat, double lon, double height) {
     ESP_RETURN_ON_ERROR(stop_output(), kTag, "Output reset failed");
     ESP_RETURN_ON_ERROR(
