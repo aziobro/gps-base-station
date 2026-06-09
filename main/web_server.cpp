@@ -5,7 +5,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <string_view>
+#include <sys/stat.h>
 #include <vector>
 
 #include "base_station.hpp"
@@ -123,20 +125,22 @@ void restart_task(void *) {
 }  // namespace
 
 esp_err_t AdminWebServer::start(
-    Storage &storage, WifiManager &wifi, BaseStation &station) {
+    Storage &storage, WifiManager &wifi,
+    BaseStation &station, SdManager &sd) {
     storage_ = &storage;
     wifi_ = &wifi;
     station_ = &station;
+    sd_ = &sd;
 
     httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
-    tls_config.httpd.max_uri_handlers = 20;
+    tls_config.httpd.max_uri_handlers = 25;
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 10;
     tls_config.httpd.send_wait_timeout = 10;
     tls_config.httpd.lru_purge_enable = true;
-    // Allow three dashboard tabs plus one administrative request (for
+    // Allow up to seven dashboard tabs plus one administrative request (for
     // example, configuration or OTA) without evicting an active TLS session.
-    tls_config.httpd.max_open_sockets = 4;
+    tls_config.httpd.max_open_sockets = 8;
     tls_config.httpd.keep_alive_enable = true;
     tls_config.httpd.keep_alive_idle = 15;
     tls_config.httpd.keep_alive_interval = 5;
@@ -208,6 +212,12 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/survey", HTTP_POST, survey_handler, this},
         {"/config/wifi", HTTP_POST, wifi_handler, this},
         {"/ca.crt", HTTP_GET, ca_certificate_handler, this},
+        {"/files", HTTP_GET, files_page_handler, this},
+        {"/files/list", HTTP_GET, files_list_handler, this},
+        {"/files/download", HTTP_GET, files_download_handler, this},
+        {"/files/delete", HTTP_POST, files_delete_handler, this},
+        {"/files/rename", HTTP_POST, files_rename_handler, this},
+        {"/files/mkdir", HTTP_POST, files_mkdir_handler, this},
     };
     for (const auto &handler : handlers) {
         ESP_RETURN_ON_ERROR(
@@ -380,8 +390,23 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         " <span class='dim'>| low watermark " +
         human_bytes(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)) +
         "</span></td></tr>"
+        "<tr><td>SD card</td><td id='st-sd'>" +
+        [&]() {
+            if (!server->sd_->is_mounted()) return std::string("<span class='err'>not mounted</span>");
+            const auto ds = server->sd_->disk_stats();
+            if (!ds.valid) return std::string("<span class='ok'>mounted</span>");
+            const unsigned pct = ds.total_bytes
+                ? static_cast<unsigned>(ds.used_bytes * 100 / ds.total_bytes) : 0;
+            const char *cls = pct < 80 ? "ok" : (pct < 95 ? "warn" : "err");
+            return std::string("<span class='") + cls + "'>" +
+                human_bytes(ds.used_bytes) + " used of " +
+                human_bytes(ds.total_bytes) + " (" +
+                std::to_string(pct) + "%)</span>";
+        }() +
+        "</td></tr>"
         "</table><p><a href='/config'>Configuration</a> &nbsp; "
         "<a href='/skyplot'>Sky plot</a> &nbsp; "
+        "<a href='/files'>SD card files</a> &nbsp; "
         "<a href='/status'>JSON status</a> &nbsp; "
         "<a href='/update'>Firmware update</a></p>"
         R"HTML(<script>
@@ -411,6 +436,9 @@ async function refresh(){
   set('st-clients',d.local_clients);set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
   const hp=Math.round(d.free_heap*100/d.heap_total),hc=hp>=40?'ok':hp>=20?'warn':'err';
   set('st-heap',"<span class='"+hc+"'>"+bytes(d.free_heap)+" ("+hp+"% free)</span> <span class='dim'>| low watermark "+bytes(d.min_free_heap)+"</span>");
+  if(!d.sd_mounted){set('st-sd',"<span class='err'>not mounted</span>");}
+  else if(!d.sd_total){set('st-sd',"<span class='ok'>mounted</span>");}
+  else{const sp=Math.round(d.sd_used*100/d.sd_total),sc=sp<80?'ok':sp<95?'warn':'err';set('st-sd',"<span class='"+sc+"'>"+bytes(d.sd_used)+" used of "+bytes(d.sd_total)+" ("+sp+"%)</span>");}
  }catch(e){}finally{statusRequest=false;setTimeout(refresh,15000);}
 }
 setTimeout(refresh,15000);
@@ -692,7 +720,14 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"rtk2go\":" + provider_json(station.rtk2go) +
         ",\"onocoy\":" + provider_json(station.onocoy) +
         ",\"rtkdata\":" + provider_json(station.rtkdata) +
-        ",\"position_valid\":" + (position.valid ? "true" : "false") + "}";
+        ",\"position_valid\":" + (position.valid ? "true" : "false") +
+        [&]() {
+            const bool m = server->sd_->is_mounted();
+            const auto ds = server->sd_->disk_stats();
+            return std::string(",\"sd_mounted\":") + (m ? "true" : "false") +
+                ",\"sd_total\":" + std::to_string(ds.total_bytes) +
+                ",\"sd_used\":"  + std::to_string(ds.used_bytes);
+        }() + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, body.c_str(), body.size());
@@ -1018,4 +1053,273 @@ std::string AdminWebServer::json_escape(const std::string &value) {
         }
     }
     return out;
+}
+
+std::string AdminWebServer::query_param(httpd_req_t *request, const char *key) {
+    size_t qlen = httpd_req_get_url_query_len(request);
+    if (qlen == 0) return {};
+    std::string qbuf(qlen + 1, '\0');
+    if (httpd_req_get_url_query_str(request, qbuf.data(), qbuf.size()) != ESP_OK) return {};
+    std::string keyed = std::string(key) + "=";
+    size_t pos = qbuf.find(keyed);
+    if (pos == std::string::npos) return {};
+    size_t val_start = pos + keyed.size();
+    size_t val_end = qbuf.find('&', val_start);
+    if (val_end == std::string::npos) val_end = qlen;
+    return url_decode(qbuf.substr(val_start, val_end - val_start));
+}
+
+// Extracts a simple unescaped string field from a JSON body.
+// Only handles the pattern: "key":"value" — sufficient for file paths.
+std::string AdminWebServer::json_field(const std::string &body, const char *key) {
+    std::string needle = std::string("\"") + key + "\":\"";
+    size_t pos = body.find(needle);
+    if (pos == std::string::npos) return {};
+    pos += needle.size();
+    size_t end = body.find('"', pos);
+    if (end == std::string::npos) return {};
+    return body.substr(pos, end - pos);
+}
+
+// ── SD card file browser ──────────────────────────────────────────────────────
+
+esp_err_t AdminWebServer::files_page_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const bool mounted = server->sd_->is_mounted();
+    const std::string mount = SdManager::kMountPoint;
+
+    // Inject the mount-point constant in a plain string tag so it is evaluated
+    // before the raw-string script block (raw strings cannot be interpolated).
+    const SdManager::DiskStats ds = server->sd_->disk_stats();
+    const unsigned sd_pct = (ds.valid && ds.total_bytes)
+        ? static_cast<unsigned>(ds.used_bytes * 100 / ds.total_bytes) : 0;
+    const char *bar_class = sd_pct < 80 ? "ok" : (sd_pct < 95 ? "warn" : "err");
+
+    std::string storage_block;
+    if (mounted && ds.valid) {
+        char bar_html[512];
+        snprintf(bar_html, sizeof(bar_html),
+            "<div style='margin-bottom:12px'>"
+            "<div style='color:#888;font-size:0.85em;margin-bottom:4px'>"
+            "Storage: <span class='%s'>%s used of %s (%u%%)</span></div>"
+            "<div style='background:#222;border-radius:3px;height:8px;width:100%%'>"
+            "<div style='background:%s;border-radius:3px;height:8px;width:%u%%'></div>"
+            "</div></div>",
+            bar_class,
+            human_bytes(ds.used_bytes).c_str(),
+            human_bytes(ds.total_bytes).c_str(),
+            sd_pct,
+            sd_pct < 80 ? "#0f0" : (sd_pct < 95 ? "#fa0" : "#f44"),
+            sd_pct);
+        storage_block = bar_html;
+    } else {
+        storage_block = "<p style='color:#888;font-size:0.85em'>Storage: " +
+            std::string(mounted ? "calculating…" : "<span class='err'>not mounted</span>") +
+            "</p>";
+    }
+
+    std::string content =
+        "<p><a href='/' style='color:#0d0'>&larr; Status</a></p>"
+        "<h2>SD Card Files</h2>" +
+        storage_block +
+        "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap'>"
+        "<div id='breadcrumb' style='color:#888;word-break:break-all;flex:1'>/</div>"
+        "<button id='mkdir-btn' onclick='mkdirPrompt()' style='padding:3px 10px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer;white-space:nowrap'>+ New Folder</button>"
+        "</div>"
+        "<div style='overflow-x:auto'>"
+        "<table><thead><tr>"
+        "<th style='text-align:left;padding:4px 8px'>Name</th>"
+        "<th style='text-align:right;padding:4px 8px'>Size</th>"
+        "<th style='text-align:right;padding:4px 8px'>Actions</th>"
+        "</tr></thead>"
+        "<tbody id='file-list'>"
+        "<tr><td colspan='3' style='padding:10px 8px;color:#888'>Loading&hellip;</td></tr>"
+        "</tbody></table></div>"
+        "<script>var SD_ROOT='" + mount + "';</script>"
+        R"JSEOF(
+<script>
+var filePath=SD_ROOT;
+var fileEntries=[];
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function fmtSize(b){if(b===0)return'<span style="color:#888">Folder</span>';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
+function breadcrumb(path){
+  var parts=path.split('/').filter(function(p){return p.length>0;});
+  var html='<span style="color:#555">/ </span>';var built='';
+  parts.forEach(function(p,i){built+='/'+p;var b=built;
+    if(i<parts.length-1)html+='<a href="#" onclick="loadDir(\''+esc(b)+'\');return false" style="color:#0d0">'+esc(p)+'</a><span style="color:#555"> / </span>';
+    else html+='<span>'+esc(p)+'</span>';
+  });
+  document.getElementById('breadcrumb').innerHTML=html;
+}
+function loadDir(path){
+  filePath=path;breadcrumb(path);
+  var tb=document.getElementById('file-list');
+  tb.innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
+  fetch('/files/list?path='+encodeURIComponent(path))
+    .then(function(r){return r.json();}).then(function(entries){
+      fileEntries=entries.sort(function(a,b){
+        if(a.is_dir!==b.is_dir)return a.is_dir?-1:1;
+        return a.name<b.name?-1:a.name>b.name?1:0;
+      });
+      var rows='';
+      if(path!==SD_ROOT){
+        var parent=path.substring(0,path.lastIndexOf('/'))||SD_ROOT;
+        rows+='<tr><td colspan="3" style="padding:5px 8px"><a href="#" onclick="loadDir(\''+esc(parent)+'\');return false" style="color:#0d0">&#8679; ..</a></td></tr>';
+      }
+      if(!fileEntries.length){rows+='<tr><td colspan="3" style="padding:10px 8px;color:#888">Empty directory</td></tr>';}
+      fileEntries.forEach(function(e,i){
+        var nameCell=e.is_dir
+          ?'<a href="#" onclick="loadDir(fileEntries['+i+'].path);return false" style="color:#0d0">[dir] '+esc(e.name)+'</a>'
+          :'[file] '+esc(e.name);
+        var acts='';
+        if(!e.is_dir)acts+='<button onclick="dlFile('+i+')" title="Download" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer">dl</button>';
+        acts+='<button onclick="renameEntry('+i+')" title="Rename" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#fa0;border:1px solid #fa0;cursor:pointer">rn</button>';
+        acts+='<button onclick="delEntry('+i+')" title="Delete" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#f44;border:1px solid #f44;cursor:pointer">del</button>';
+        rows+='<tr style="border-bottom:1px solid #222"><td style="padding:6px 8px">'+nameCell+'</td>'
+          +'<td style="padding:6px 8px;text-align:right;color:#888">'+fmtSize(e.size)+'</td>'
+          +'<td style="padding:6px 4px;text-align:right;white-space:nowrap">'+acts+'</td></tr>';
+      });
+      tb.innerHTML=rows;
+    }).catch(function(){
+      document.getElementById('file-list').innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#f44">Failed to load directory</td></tr>';
+    });
+}
+function dlFile(i){window.location.href='/files/download?path='+encodeURIComponent(fileEntries[i].path);}
+function renameEntry(i){
+  var e=fileEntries[i];
+  var n=prompt('Rename "'+e.name+'" to:',e.name);
+  if(!n||n===e.name)return;
+  var dir=e.path.substring(0,e.path.lastIndexOf('/'));
+  fetch('/files/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:e.path,to:dir+'/'+n})})
+    .then(function(r){return r.json();}).then(function(res){if(res.ok)loadDir(filePath);else alert('Rename failed');})
+    .catch(function(){alert('Request failed');});
+}
+function delEntry(i){
+  var e=fileEntries[i];
+  if(!confirm('Delete '+(e.is_dir?'folder':'file')+' "'+e.name+'"?'))return;
+  fetch('/files/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:e.path})})
+    .then(function(r){return r.json();}).then(function(res){if(res.ok)loadDir(filePath);else alert('Delete failed');})
+    .catch(function(){alert('Request failed');});
+}
+function mkdirPrompt(){
+  var n=prompt('New folder name:');
+  if(!n||!n.trim())return;
+  n=n.trim();
+  fetch('/files/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath+'/'+n})})
+    .then(function(r){return r.json();}).then(function(res){if(res.ok)loadDir(filePath);else alert('Failed: '+res.error);})
+    .catch(function(){alert('Request failed');});
+}
+loadDir(SD_ROOT);
+</script>
+)JSEOF";
+
+    return server->send_page(request, "SD Card Files", content);
+}
+
+esp_err_t AdminWebServer::files_list_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    if (!server->sd_->is_mounted()) {
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, "[]");
+    }
+    std::string path = server->query_param(request, "path");
+    if (path.empty()) path = SdManager::kMountPoint;
+
+    if (!SdManager::safe_path(path.c_str())) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid path");
+    }
+    char *json = server->sd_->list_dir(path.c_str());
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_sendstr(request, json ? json : "[]");
+    free(json);
+    return ESP_OK;
+}
+
+esp_err_t AdminWebServer::files_download_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    if (!server->sd_->is_mounted()) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, "SD card not mounted");
+    }
+    const std::string path = server->query_param(request, "path");
+    if (path.empty() || !SdManager::safe_path(path.c_str())) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid path");
+    }
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) {
+        return httpd_resp_send_err(request, HTTPD_404_NOT_FOUND, "Not found");
+    }
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) {
+        return httpd_resp_send_err(
+            request, HTTPD_500_INTERNAL_SERVER_ERROR, "Open failed");
+    }
+    const char *filename = strrchr(path.c_str(), '/');
+    filename = filename ? filename + 1 : path.c_str();
+    char disp[160];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", filename);
+    httpd_resp_set_type(request, "application/octet-stream");
+    httpd_resp_set_hdr(request, "Content-Disposition", disp);
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (httpd_resp_send_chunk(request, buf, static_cast<ssize_t>(n)) != ESP_OK) break;
+    }
+    fclose(f);
+    httpd_resp_send_chunk(request, nullptr, 0);
+    return ESP_OK;
+}
+
+esp_err_t AdminWebServer::files_delete_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const std::string body = read_body(request, 512);
+    const std::string path = json_field(body, "path");
+    const bool ok = !path.empty() &&
+                    SdManager::safe_path(path.c_str()) &&
+                    server->sd_->delete_entry(path.c_str());
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+esp_err_t AdminWebServer::files_rename_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const std::string body = read_body(request, 512);
+    const std::string from = json_field(body, "from");
+    const std::string to   = json_field(body, "to");
+    const bool ok = !from.empty() && !to.empty() &&
+                    SdManager::safe_path(from.c_str()) &&
+                    SdManager::safe_path(to.c_str()) &&
+                    server->sd_->rename_entry(from.c_str(), to.c_str());
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+esp_err_t AdminWebServer::files_mkdir_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    if (!server->sd_->is_mounted()) {
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, "{\"ok\":false,\"error\":\"not mounted\"}");
+    }
+    const std::string body = read_body(request, 512);
+    const std::string path = json_field(body, "path");
+    if (path.empty() || !SdManager::safe_path(path.c_str())) {
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, "{\"ok\":false,\"error\":\"invalid path\"}");
+    }
+    const bool ok = mkdir(path.c_str(), 0755) == 0;
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"mkdir failed\"}");
 }

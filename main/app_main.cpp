@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
+#include "sd_manager.hpp"
 #include "storage.hpp"
 #include "wifi_manager.hpp"
 #include "web_server.hpp"
@@ -118,8 +119,15 @@ extern "C" void app_main() {
     base_station.set_streams_suspended(true);
     ESP_ERROR_CHECK(base_station.start());
 
+    static SdManager sd_manager;
+    if (sd_manager.mount() == ESP_OK) {
+        sd_manager.ensure_dirs();
+    } else {
+        ESP_LOGW(kTag, "SD card not available — file browser will show empty state");
+    }
+
     static AdminWebServer web_server;
-    ESP_ERROR_CHECK(web_server.start(storage, wifi_manager, base_station));
+    ESP_ERROR_CHECK(web_server.start(storage, wifi_manager, base_station, sd_manager));
     ESP_LOGI(kTag, "Administration server ready; RTK services held briefly");
 
     ESP_ERROR_CHECK(

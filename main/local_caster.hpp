@@ -21,7 +21,7 @@ public:
 private:
     static constexpr size_t kMaxPacket = 1024;
     static constexpr int kQueueDepth = 12;
-    static constexpr int kMaxClients = 4;
+    static constexpr int kMaxClients = 8;
     struct Packet {
         uint16_t length;
         uint8_t data[kMaxPacket];
@@ -34,7 +34,7 @@ private:
     std::atomic<bool> reset_clients_{false};
     std::atomic<int> client_count_{0};
     int listener_ = -1;
-    int clients_[kMaxClients] = {-1, -1, -1, -1};
+    int clients_[kMaxClients] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
     static void task_entry(void *argument);
     void run();

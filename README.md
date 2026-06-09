@@ -1,6 +1,6 @@
 # GPS RTK Base Station
 
-An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estimates or accepts a fixed antenna position, then streams RTCM3 correction data to multiple NTRIP casters simultaneously. Rover precision can be centimetre-level, but absolute accuracy is limited by the accuracy of the configured base position.
+An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It estimates or accepts a fixed antenna position, then streams RTCM3 correction data to multiple NTRIP casters simultaneously. Rover precision can be centimetre-level, but absolute accuracy is limited by the accuracy of the configured base position.
 
 ## Features
 
@@ -8,11 +8,13 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 - **Multi-constellation RTCM3** — GPS (1074), GLONASS (1084), Galileo (1094), BeiDou (1124) + base position (1005)
 - **Three simultaneous NTRIP push destinations** — RTK2go, Onocoy, RTKdata.online (each independently reconnecting via FreeRTOS task)
 - **Real-time stream buffering** — RTCM is batched into short 200 ms chunks; stale corrections are not queued while a provider reconnects
-- **Local NTRIP caster** — port 2101, up to 4 simultaneous rover clients on the local network
-- **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength
+- **Local NTRIP caster** — port 2101, up to 8 simultaneous rover clients on the local network
+- **SD card file browser** — browse, download, rename, delete, and create directories via the web UI; `logs/` and `rawdata/` directories created automatically on first mount
+- **SD card storage stats** — used / free / total displayed on both the status page and file browser with a visual progress bar
+- **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, and SD card storage
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
-- **HTTPS administration** — TLS-protected status, configuration, sky plot, and OTA pages
-- **OTA firmware updates** — upload new firmware via HTTPS, no USB required
+- **HTTPS administration** — TLS-protected status, configuration, sky plot, SD card, and OTA pages
+- **OTA firmware updates** — upload new firmware via HTTPS, no USB required after initial flash
 - **WiFi provisioning** — hotspot (AP) mode with network scan if no WiFi is configured
 - **NVS storage** — base position and credentials survive power cycles
 - **Password-protected web UI** — Basic Auth on all pages
@@ -23,55 +25,51 @@ An ESP32-based GNSS RTK base station using the Unicore UM980 receiver. It estima
 
 | Component | Notes |
 |-----------|-------|
-| ESP32 Dev Module | Any standard 38-pin ESP32 dev board |
+| Waveshare ESP32-P4-WIFI6-Touch-LCD-4B | ESP32-P4 host (400 MHz, 768 KB SRAM) + ESP32-C6 WiFi coprocessor over SDIO |
 | Unicore UM980 | Multi-constellation GNSS receiver (GPS/GLONASS/Galileo/BeiDou) |
-| USB-C cable | Powers and provides debug serial on UM980 COM1 |
+| microSD card | Optional — used for data logging and file browser |
+
+The ESP32-C6 WiFi coprocessor communicates with the P4 host over SDIO via `esp_hosted`. Because the SDMMC peripheral is held exclusively by `esp_hosted` in ESP-IDF 6.x, the microSD card is accessed over SPI2 instead (same physical pins, independent peripheral).
 
 ---
 
 ## Wiring
 
-The ESP32 uses two UART ports to communicate with the UM980:
-
-- **Serial1 (CMD)** — bidirectional config channel (UM980 COM2)
-- **Serial2 (DATA)** — RTCM3 binary output (UM980 COM3)
+The ESP32-P4 uses two UART ports to communicate with the UM980 (connected to the P3 header):
 
 ```
-UM980                        ESP32
-─────                        ─────
-COM2 TX  ──────────────────► IO18  (Serial1 RX — config responses)
-COM2 RX  ◄────────────────── IO19  (Serial1 TX — config commands)
+UM980                        ESP32-P4 (P3 header)
+─────                        ────────────────────
+COM2 TX  ──────────────────► GPIO2   (UART1 RX — config responses)
+COM2 RX  ◄────────────────── GPIO3   (UART1 TX — config commands)
 
-COM3 TX  ──────────────────► IO16  (Serial2 RX — RTCM binary data)
-COM3 RX  ◄────────────────── IO17  (Serial2 TX — unused after init)
-
-COM1 TX/RX ◄──────────────── USB-C (direct PC debug only, not ESP32)
+COM3 TX  ──────────────────► GPIO21  (UART2 RX — RTCM binary data)
+COM3 RX  ◄────────────────── GPIO22  (UART2 TX — unused after init)
 ```
 
-**Power:** Both boards are powered via their respective USB-C connectors.
+**Do not use GPIO16/17** — reserved for the P4↔C6 WiFi coprocessor UART.  
+**Do not use GPIO37/38** — wired to the onboard CH343P USB-UART chip.
 
-**Logic levels:** Both the UM980 and ESP32 operate at 3.3 V logic — no level shifter required.
+### microSD card pins (SPI mode)
 
-**Baud rate:** 115200 on both UART ports.
+| SD card signal | ESP32-P4 GPIO |
+|----------------|--------------|
+| CLK | 43 |
+| CMD / MOSI | 44 |
+| D0 / MISO | 39 |
+| D3 / CS | 42 |
+
+The SD card supply (VDDPST) is powered through on-chip LDO channel 4 (`ESP_LDO_VO4`), which the firmware enables before mounting.
 
 ---
 
 ## Software
 
-The migration branch is a native [ESP-IDF](https://github.com/espressif/esp-idf)
-v6.0.1 project. The production Arduino firmware remains available on `main`
-until hardware-in-the-loop validation is complete.
-
-Native components use `esp_wifi`, `esp_https_server`, `esp_ota_ops`, NVS,
-FreeRTOS, and lwIP sockets directly.
+Native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project. Uses `esp_wifi` (via `esp_hosted`), `esp_https_server`, `esp_ota_ops`, `esp_vfs_fat` (SDSPI), NVS, FreeRTOS, and lwIP directly.
 
 ---
 
 ## Building & Flashing
-
-This is a native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project
-targeting the **ESP32-P4**, whose Wi-Fi is provided by an onboard ESP32-C6
-coprocessor over SDIO via `esp_hosted`.
 
 ### Prerequisites
 
@@ -83,9 +81,7 @@ git clone https://github.com/aziobro/gps-base-station.git
 cd gps-base-station
 ```
 
-`idf.sh` is a thin wrapper that activates the ESP-IDF environment (so you never
-have to `source export.sh` by hand) and runs any `idf.py` command against the
-board:
+`idf.sh` is a thin wrapper that activates the ESP-IDF environment and runs `idf.py`:
 
 ```bash
 ./idf.sh build            # build
@@ -95,73 +91,47 @@ board:
 
 Override the serial port with `PORT=/dev/tty.yourdevice ./idf.sh flash`.
 
-Generate a device-local certificate authority and server certificate before
-the first build:
+Generate a device-local certificate authority and server certificate before the first build:
 
 ```bash
 ./tools/generate-https-certs.sh
 ```
 
-The generated private keys in `main/certs/` are ignored by Git. Back them up
-securely if future firmware must continue using the same trusted certificate.
+The generated private keys in `main/certs/` are ignored by Git. Back them up securely if future firmware must continue using the same trusted certificate.
 
-Runtime credentials (Wi-Fi, NTRIP, admin password) are configured through the
-web interface and retained in the `gps_base` NVS namespace.
+Runtime credentials (Wi-Fi, NTRIP, admin password) are configured through the web interface and retained in the `gps_base` NVS namespace.
 
 ### First Flash (USB)
 
-The first install must go over USB so the bootloader and partition table land
-alongside the application:
+The first install must go over USB so the bootloader and partition table land alongside the application:
 
 ```bash
 ./idf.sh set-target esp32p4   # one-time, on a fresh build tree
 ./idf.sh flash monitor
 ```
 
+---
+
 ## Versioning & Releases
 
-The firmware version has a **single source of truth**: `version.txt` in the
-repository root. ESP-IDF embeds it in the application descriptor at build time,
-so `esp_app_get_description()->version` — the value shown on the web status page
-and returned by `/status` — always matches `version.txt`. Do not hard-code a
-version anywhere else.
+The firmware version has a **single source of truth**: `version.txt` in the repository root. ESP-IDF embeds it in the application descriptor at build time, so `esp_app_get_description()->version` — the value shown on the web status page and returned by `/status` — always matches `version.txt`.
 
-`tools/release.sh` bumps the version, builds, pushes the update (USB or OTA),
-and then **verifies the device is actually running the new version** before
-declaring success:
+`tools/release.sh` bumps the version, builds, pushes the update (USB or OTA), and then **verifies the device is actually running the new version** before declaring success:
 
 ```bash
 # Build only — bump + build + confirm the binary embeds the new version.
-# No device required (good for CI). Auto-increments the trailing number.
 tools/release.sh build [VERSION]
 
-# USB — bump + build + flash over USB. Set DEVICE_HOST=<ip> to also confirm
-# the live /status version once the device reboots.
+# USB — bump + build + flash over USB.
 tools/release.sh usb [VERSION]
 
-# OTA — bump + build + upload over HTTPS to a running device, then poll
-# /status until it reports the new version.
+# OTA — bump + build + upload over HTTPS, then poll /status until confirmed.
 ADMIN_PASSWORD=secret tools/release.sh ota <device-ip> [VERSION]
 ```
 
-`VERSION` is optional; when omitted, the trailing integer of the current
-version is incremented (e.g. `2026.06.09-ota1` → `2026.06.09-ota2`). The
-on-device check reads the version straight from `/status`, so a release only
-passes once the new firmware is confirmed live.
+`VERSION` is optional; when omitted, the trailing integer of the current version is incremented (e.g. `2026.06.09-ota1` → `2026.06.09-ota2`).
 
-Under the hood, `tools/fw_version.py` extracts the version embedded in a built
-`.bin` by locating the `esp_app_desc_t` magic word — the same struct the device
-reports at runtime — which is how the build-time check guarantees the binary
-carries the intended version.
-
-### Manual OTA
-
-You can also update from a browser: navigate to `https://<device-ip>/update`,
-upload `build/gps_base_station.bin`, then confirm the version on the status page.
-`tools/release.sh ota` automates exactly this, plus verification.
-
-A failed OTA rolls back automatically — the new image must pass a 30-second
-health check after reboot, otherwise the previous firmware is restored.
+A failed OTA rolls back automatically — the new image must pass a 30-second health check after reboot, otherwise the previous firmware is restored.
 
 ---
 
@@ -178,14 +148,14 @@ If no WiFi credentials are stored, the device starts in AP mode:
 
 ### Web Interface
 
-Once connected, find the device IP from your router or the serial monitor
-output. HTTP requests redirect to HTTPS, except while AP fallback is active.
+Once connected, find the device IP from your router or the serial monitor output. HTTP requests redirect to HTTPS, except while AP fallback is active.
 
 | URL | Description |
 |-----|-------------|
-| `https://<ip>/` | Status page — live satellite counts, RTCM throughput, service status |
+| `https://<ip>/` | Status page — satellite counts, RTCM throughput, service status, SD card stats |
 | `https://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
 | `https://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
+| `https://<ip>/files` | SD card file browser — browse, download, create folders, rename, delete |
 | `https://<ip>/update` | OTA firmware update |
 | `http://<ip>/ca.crt` | Download the local CA certificate |
 
@@ -193,16 +163,11 @@ The web UI is password protected. On first access you'll be prompted to set an a
 
 ### Trusting HTTPS
 
-The ESP32 uses a project-local certificate authority because public
-certificate services cannot validate a private LAN address.
+The ESP32-P4 uses a project-local certificate authority because public certificate services cannot validate a private LAN address.
 
 1. Download `http://<device-ip>/ca.crt`.
 2. Import it into the operating system trust store as a trusted root.
 3. Open `https://<device-ip>/`.
-
-The generated server certificate covers `gps-base.local`, `192.168.8.195`,
-and the fallback AP address `192.168.4.1`. The hostname requires local DNS or
-a hosts-file entry if the network does not resolve `.local` names.
 
 ---
 
@@ -221,12 +186,7 @@ On first boot (or after pressing **Start New Survey-in**), the device enters sur
 4. The converged position is saved to NVS flash
 5. The device automatically switches to Base TX mode
 
-The survey panel shows block-to-block position stability, satellite counts, and a convergence chart.
-
-> Stability is not absolute accuracy. Autonomous averaging cannot remove common
-> GNSS biases and does not establish survey-grade absolute coordinates. For high absolute accuracy,
-> enter a professionally surveyed or externally post-processed position on the
-> configuration page.
+> Stability is not absolute accuracy. Autonomous averaging cannot remove common GNSS biases. For high absolute accuracy, enter a professionally surveyed or post-processed position on the configuration page.
 
 ### Base TX Mode
 
@@ -274,7 +234,6 @@ Password:   (leave empty)
 1. Register at [console.onocoy.com](https://console.onocoy.com)
 2. The **base station mountpoint** (used by this firmware to push data) is different from the **rover mountpoint** (used by rover clients to pull corrections)
 3. Enter the base station mountpoint and API key in `/config`
-4. Protocol: NTRIP v2 (automatically selected)
 
 ### RTKdata.online
 
@@ -287,26 +246,27 @@ Password:   (leave empty)
 
 ```
                     ┌─────────────────────────────────────────┐
-                    │              ESP32                       │
+                    │           ESP32-P4                       │
                     │                                          │
-UM980 COM2 ────────►│ Serial1 (CMD)   SurveyManager           │
-UM980 COM3 ────────►│ Serial2 (DATA)  ──► localCaster ──────► │──► Rovers (port 2101)
-                    │                  │                       │
-                    │                  ├──► RTK2go task ──────►│──► ntrip.rtk2go.com
-                    │                  ├──► Onocoy task ──────►│──► servers.onocoy.com
-                    │                  └──► RTKdata task ─────►│──► rtkdata.online
+UM980 COM2 ────────►│ UART1 (CMD)     SurveyManager           │
+UM980 COM3 ────────►│ UART2 (DATA) ──► LocalCaster ─────────► │──► Rovers (port 2101)
+                    │               │                          │
+                    │               ├──► RTK2go task ─────────►│──► ntrip.rtk2go.com
+                    │               ├──► Onocoy task ─────────►│──► servers.onocoy.com
+                    │               └──► RTKdata task ─────────►│──► rtkdata.online
+                    │                                          │
+microSD ───────────►│ SPI2 (SDSPI)    VFS FAT                 │
                     │                                          │
                     │ HTTPS admin (443) ◄──────────────────────│◄── Browser
                     │ HTTP redirect/AP setup (80)              │
+                    │                                          │
+ESP32-C6 ──────────►│ SDIO (esp_hosted) WiFi                  │
                     └─────────────────────────────────────────┘
 ```
 
-Each NTRIP push client runs on its own FreeRTOS task on Core 0. The native base
-station task on Core 1 enqueues RTCM packets non-blocking via a 12-packet queue
-per service. TCP connect, reconnect, and backoff logic runs in the background.
+Each NTRIP push client runs on its own FreeRTOS task. The base station task enqueues RTCM packets non-blocking via a 12-packet queue per service. TCP connect, reconnect, and backoff logic runs in the background.
 
-During OTA, active provider and local rover streams are suspended before flash
-writes begin; a failed OTA automatically resumes them.
+During OTA, active provider and local rover streams are suspended before flash writes begin; a failed OTA automatically resumes them.
 
 ---
 
@@ -320,7 +280,9 @@ writes begin; a failed OTA automatically resumes them.
 | NTRIP shows "rejected: ICY 401" | Wrong password | Re-enter password in `/config` |
 | Web page not responding | Device overloaded or WiFi drop | Wait ~15 s; device auto-reconnects |
 | Browser reports untrusted HTTPS | Local CA not installed | Download `/ca.crt` over HTTP and trust it |
-| OTA upload fails | Firmware too large | Check Flash: line in build output — must be under 100% |
+| OTA upload fails | Firmware too large | Check Flash line in build output — must be under 100% |
+| SD card shows "not mounted" | LDO channel 4 not enabled | Verify firmware version ≥ ota18 |
+| SD card shows "calculating…" | `statvfs` not supported on FATFS | Verify firmware version ≥ ota22 (uses `esp_vfs_fat_info`) |
 
 ---
 
@@ -328,17 +290,18 @@ writes begin; a failed OTA automatically resumes them.
 
 ```
 main/
-├── app_main.cpp       — native ESP-IDF startup
+├── app_main.cpp       — ESP-IDF startup, UART init, SD mount, web server start
 ├── base_station.*     — SURVEY to BASE_TX state machine and RTCM fan-out
-├── storage.*          — Arduino-compatible NVS persistence
+├── storage.*          — NVS persistence (position, WiFi, NTRIP credentials)
 ├── um980.*            — UM980 command channel
 ├── survey.*           — block-averaged survey and satellite parsing
-├── local_caster.*     — local NTRIP caster
-├── ntrip_push.*       — isolated upstream NTRIP workers
-├── web_server.*       — authenticated status, config, sky plot, and OTA
+├── local_caster.*     — local NTRIP caster (port 2101, up to 8 clients)
+├── ntrip_push.*       — isolated upstream NTRIP workers (RTK2go, Onocoy, RTKdata)
+├── sd_manager.*       — microSD via SDSPI (LDO enable, mount, browse, disk stats)
+├── web_server.*       — authenticated status, config, sky plot, SD browser, OTA
 └── wifi_manager.*     — event-driven station/AP recovery
 partitions.csv         — OTA flash layout (ota_0 / ota_1 / otadata)
-sdkconfig.defaults     — native ESP-IDF configuration
+sdkconfig.defaults     — ESP-IDF kconfig overrides (socket pool, lwIP tuning)
 version.txt            — single source of truth for the firmware version
 idf.sh                 — ESP-IDF environment + idf.py wrapper
 tools/

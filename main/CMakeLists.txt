@@ -4,6 +4,7 @@ idf_component_register(
         "base_station.cpp"
         "local_caster.cpp"
         "ntrip_push.cpp"
+        "sd_manager.cpp"
         "storage.cpp"
         "survey.cpp"
         "um980.cpp"
@@ -14,8 +15,10 @@ idf_component_register(
     REQUIRES
         esp_driver_gpio
         esp_driver_uart
-        esp_driver_sdmmc
+        esp_driver_spi
+        esp_driver_sdspi
         sdmmc
+        fatfs
         esp_event
         esp_http_server
         esp_https_server
