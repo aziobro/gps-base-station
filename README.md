@@ -69,9 +69,13 @@ FreeRTOS, and lwIP sockets directly.
 
 ## Building & Flashing
 
+This is a native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project
+targeting the **ESP32-P4**, whose Wi-Fi is provided by an onboard ESP32-C6
+coprocessor over SDIO via `esp_hosted`.
+
 ### Prerequisites
 
-1. Install ESP-IDF v6.0.1.
+1. Install ESP-IDF v6.0.1 (the repo expects it under `.tools/esp-idf-v6.0.1`).
 2. Clone this repository.
 
 ```bash
@@ -79,8 +83,17 @@ git clone https://github.com/aziobro/gps-base-station.git
 cd gps-base-station
 ```
 
-Runtime credentials are configured through the web interface and retained in
-the existing `gps_base` NVS namespace.
+`idf.sh` is a thin wrapper that activates the ESP-IDF environment (so you never
+have to `source export.sh` by hand) and runs any `idf.py` command against the
+board:
+
+```bash
+./idf.sh build            # build
+./idf.sh flash monitor    # flash over USB and open the serial monitor
+./idf.sh fullclean        # clean
+```
+
+Override the serial port with `PORT=/dev/tty.yourdevice ./idf.sh flash`.
 
 Generate a device-local certificate authority and server certificate before
 the first build:
@@ -92,24 +105,63 @@ the first build:
 The generated private keys in `main/certs/` are ignored by Git. Back them up
 securely if future firmware must continue using the same trusted certificate.
 
+Runtime credentials (Wi-Fi, NTRIP, admin password) are configured through the
+web interface and retained in the `gps_base` NVS namespace.
+
 ### First Flash (USB)
 
+The first install must go over USB so the bootloader and partition table land
+alongside the application:
+
 ```bash
-source .tools/esp-idf-v6.0.1/export.sh
-idf.py set-target esp32
-idf.py build
-idf.py flash monitor
+./idf.sh set-target esp32p4   # one-time, on a fresh build tree
+./idf.sh flash monitor
 ```
 
-### Subsequent Updates (OTA)
+## Versioning & Releases
 
-Once native firmware and its bootloader have been installed over USB, navigate
-to `https://<device-ip>/update` and upload `build/gps_base_station.bin`.
+The firmware version has a **single source of truth**: `version.txt` in the
+repository root. ESP-IDF embeds it in the application descriptor at build time,
+so `esp_app_get_description()->version` — the value shown on the web status page
+and returned by `/status` — always matches `version.txt`. Do not hard-code a
+version anywhere else.
 
-> Do not use application-only OTA for the first Arduino-to-ESP-IDF migration.
-> OTA does not replace the Arduino bootloader, so native rollback support would
-> not yet be available. Install the native bootloader, partition table, and
-> application together over USB for the first migration.
+`tools/release.sh` bumps the version, builds, pushes the update (USB or OTA),
+and then **verifies the device is actually running the new version** before
+declaring success:
+
+```bash
+# Build only — bump + build + confirm the binary embeds the new version.
+# No device required (good for CI). Auto-increments the trailing number.
+tools/release.sh build [VERSION]
+
+# USB — bump + build + flash over USB. Set DEVICE_HOST=<ip> to also confirm
+# the live /status version once the device reboots.
+tools/release.sh usb [VERSION]
+
+# OTA — bump + build + upload over HTTPS to a running device, then poll
+# /status until it reports the new version.
+ADMIN_PASSWORD=secret tools/release.sh ota <device-ip> [VERSION]
+```
+
+`VERSION` is optional; when omitted, the trailing integer of the current
+version is incremented (e.g. `2026.06.09-ota1` → `2026.06.09-ota2`). The
+on-device check reads the version straight from `/status`, so a release only
+passes once the new firmware is confirmed live.
+
+Under the hood, `tools/fw_version.py` extracts the version embedded in a built
+`.bin` by locating the `esp_app_desc_t` magic word — the same struct the device
+reports at runtime — which is how the build-time check guarantees the binary
+carries the intended version.
+
+### Manual OTA
+
+You can also update from a browser: navigate to `https://<device-ip>/update`,
+upload `build/gps_base_station.bin`, then confirm the version on the status page.
+`tools/release.sh ota` automates exactly this, plus verification.
+
+A failed OTA rolls back automatically — the new image must pass a 30-second
+health check after reboot, otherwise the previous firmware is restored.
 
 ---
 
@@ -285,8 +337,14 @@ main/
 ├── ntrip_push.*       — isolated upstream NTRIP workers
 ├── web_server.*       — authenticated status, config, sky plot, and OTA
 └── wifi_manager.*     — event-driven station/AP recovery
-partitions.csv         — Arduino-compatible flash layout
+partitions.csv         — OTA flash layout (ota_0 / ota_1 / otadata)
 sdkconfig.defaults     — native ESP-IDF configuration
+version.txt            — single source of truth for the firmware version
+idf.sh                 — ESP-IDF environment + idf.py wrapper
+tools/
+├── release.sh         — bump → build → push (USB/OTA) → verify on device
+├── fw_version.py      — read the version embedded in a built .bin
+└── generate-https-certs.sh — create the device-local CA + server cert
 ```
 
 ---

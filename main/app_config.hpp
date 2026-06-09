@@ -4,7 +4,8 @@
 
 namespace config {
 
-inline constexpr char kFirmwareVersion[] = "2026.06.07-idf2";
+// Firmware version is sourced from version.txt at build time and read at
+// runtime via esp_app_get_description()->version — do not duplicate it here.
 
 inline constexpr uint32_t kSurveyMinTimeSec = 300;
 inline constexpr uint32_t kSurveyBlockTimeSec = 60;
