@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 
 enum class NtripProtocol {
     kV1,
@@ -67,6 +68,10 @@ private:
     std::string password_;
     std::string message_ = "disabled";
     int socket_ = -1;
+    // Cached resolved address — avoids a blocking getaddrinfo() on every
+    // reconnect, which holds the lwIP mutex and stalls HTTPS handshakes.
+    sockaddr_in cached_addr_{};
+    bool cached_addr_valid_ = false;
 
     static void task_entry(void *argument);
     void run();

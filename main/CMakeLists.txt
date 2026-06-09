@@ -14,6 +14,8 @@ idf_component_register(
     REQUIRES
         esp_driver_gpio
         esp_driver_uart
+        esp_driver_sdmmc
+        sdmmc
         esp_event
         esp_http_server
         esp_https_server
@@ -21,6 +23,7 @@ idf_component_register(
         esp_system
         esp_timer
         esp_wifi
+        esp_hosted
         app_update
         mbedtls
         nvs_flash

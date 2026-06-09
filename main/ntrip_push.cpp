@@ -35,8 +35,10 @@ esp_err_t NtripPushClient::start(
     configure(enabled, mountpoint, password);
     queue_ = xQueueCreate(kQueueDepth, sizeof(Packet));
     if (!queue_) return ESP_ERR_NO_MEM;
-    if (xTaskCreatePinnedToCore(
-            task_entry, label_, 6144, this, 4, &task_, 0) != pdPASS) {
+    // Priority 3: below httpd (5) and base_station (6) so NTRIP reconnects
+    // never starve the web server. Not pinned so the scheduler can balance
+    // across both cores freely.
+    if (xTaskCreate(task_entry, label_, 6144, this, 3, &task_) != pdPASS) {
         vQueueDelete(queue_);
         queue_ = nullptr;
         return ESP_ERR_NO_MEM;
@@ -126,6 +128,9 @@ void NtripPushClient::run() {
             set_message("connecting", false);
             if (!connect_caster()) {
                 ++failures;
+                // After several consecutive failures invalidate the cached
+                // address so the next attempt forces a fresh DNS lookup.
+                if (failures >= 3) cached_addr_valid_ = false;
                 const int retry = std::min(
                     kBaseRetryMs << std::min(failures, 3), kMaxRetryMs);
                 vTaskDelay(pdMS_TO_TICKS(retry));
@@ -196,27 +201,41 @@ bool NtripPushClient::connect_caster() {
 }
 
 bool NtripPushClient::connect_socket() {
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo *results = nullptr;
-    const std::string service = std::to_string(port_);
-    if (getaddrinfo(host_, service.c_str(), &hints, &results) != 0 ||
-        !results) {
-        return false;
-    }
-    socket_ = socket(results->ai_family, results->ai_socktype, results->ai_protocol);
-    if (socket_ < 0) {
+    // Re-resolve DNS only when we have no cached address or after repeated
+    // failures. getaddrinfo() holds the lwIP mutex for up to ~2 s which stalls
+    // TLS handshakes on the HTTPS server, so we avoid calling it every reconnect.
+    if (!cached_addr_valid_) {
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo *results = nullptr;
+        const std::string service = std::to_string(port_);
+        if (getaddrinfo(host_, service.c_str(), &hints, &results) != 0 ||
+            !results) {
+            return false;
+        }
+        memcpy(&cached_addr_, results->ai_addr,
+               std::min(sizeof(cached_addr_),
+                        static_cast<size_t>(results->ai_addrlen)));
+        cached_addr_.sin_port = htons(port_);
+        cached_addr_valid_ = true;
         freeaddrinfo(results);
+    }
+
+    socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (socket_ < 0) {
+        cached_addr_valid_ = false;  // force fresh resolve next attempt
         return false;
     }
 
     const int flags = fcntl(socket_, F_GETFL, 0);
     fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
-    int result = connect(socket_, results->ai_addr, results->ai_addrlen);
-    freeaddrinfo(results);
+    int result = connect(socket_,
+                         reinterpret_cast<sockaddr *>(&cached_addr_),
+                         sizeof(cached_addr_));
     if (result < 0 && errno != EINPROGRESS) {
         close_socket();
+        cached_addr_valid_ = false;  // may be a stale address; re-resolve next time
         return false;
     }
     fd_set write_set;

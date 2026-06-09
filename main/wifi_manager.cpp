@@ -5,7 +5,9 @@
 #include <vector>
 
 #include "esp_check.h"
+#include "esp_hosted.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/task.h"
@@ -16,6 +18,20 @@ constexpr char kTag[] = "wifi";
 
 int64_t now_ms() {
     return esp_timer_get_time() / 1000;
+}
+
+// ESP32-P4 hosted WiFi can't read MAC from the C6 coprocessor, so derive a
+// locally-administered MAC from the chip's own eFuse ID instead.
+void set_wifi_mac_from_efuse(wifi_interface_t iface) {
+    uint8_t base[6] = {};
+    esp_efuse_mac_get_default(base);
+    base[0] = (base[0] & 0xFE) | 0x02;  // locally administered, unicast
+    if (iface == WIFI_IF_AP) base[5] ^= 0x01;  // differentiate AP from STA
+    esp_err_t err = esp_wifi_set_mac(iface, base);
+    ESP_LOGI(kTag, "MAC %s set %02x:%02x:%02x:%02x:%02x:%02x (%s)",
+             iface == WIFI_IF_AP ? "AP" : "STA",
+             base[0], base[1], base[2], base[3], base[4], base[5],
+             err == ESP_OK ? "ok" : esp_err_to_name(err));
 }
 
 }  // namespace
@@ -51,8 +67,17 @@ esp_err_t WifiManager::start(Storage &storage) {
     access_point_netif_ = esp_netif_create_default_wifi_ap();
     if (!station_netif_ || !access_point_netif_) return ESP_ERR_NO_MEM;
 
+    // Bring up the esp_hosted transport to the ESP32-C6 WiFi coprocessor over
+    // SDIO before initialising WiFi. Required on ESP32-P4 (no native radio).
+    ESP_RETURN_ON_ERROR(esp_hosted_init(), kTag, "esp_hosted init failed");
+    ESP_RETURN_ON_ERROR(
+        esp_hosted_connect_to_slave(), kTag, "esp_hosted slave connect failed");
+
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&config), kTag, "WiFi init failed");
+    // This firmware owns credential persistence via Storage; keep the driver's
+    // own config in RAM so it never reloads stale settings from NVS.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_RETURN_ON_ERROR(
         esp_event_handler_instance_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, this, &wifi_handler_),
@@ -71,6 +96,7 @@ esp_err_t WifiManager::start(Storage &storage) {
             configure_station(credentials), kTag, "Station config failed");
         ESP_RETURN_ON_ERROR(
             esp_wifi_set_mode(WIFI_MODE_STA), kTag, "Station mode failed");
+        set_wifi_mac_from_efuse(WIFI_IF_STA);
         ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
         request_connect();
@@ -202,6 +228,17 @@ void WifiManager::handle_event(esp_event_base_t event_base, int32_t event_id,
             last_retry_ms_ = now_ms() - kRetryIntervalMs;
             ESP_LOGW(kTag, "Station connection lost");
         }
+        return;
+    }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(kTag, "SoftAP started — beaconing as %s", kAccessPointSsid);
+        return;
+    }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        ESP_LOGI(kTag, "AP client connected");
+        return;
     }
 }
 
@@ -228,7 +265,9 @@ void WifiManager::recovery_loop() {
                 ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
             }
 
-            if (storage_ && storage_->load_wifi().valid &&
+            // Only retry the station while still in STA mode. Once we have
+            // fallen back to the dedicated AP, esp_wifi_connect() is invalid.
+            if (!access_point_active_ && storage_ && storage_->load_wifi().valid &&
                 now - last_retry_ms_ >= kRetryIntervalMs) {
                 ESP_LOGI(kTag, "Retrying saved WiFi credentials");
                 last_retry_ms_ = now;
@@ -253,9 +292,6 @@ esp_err_t WifiManager::configure_station(
 }
 
 esp_err_t WifiManager::enable_access_point() {
-    wifi_mode_t mode = WIFI_MODE_NULL;
-    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
-
     wifi_config_t config{};
     strlcpy(reinterpret_cast<char *>(config.ap.ssid),
             kAccessPointSsid, sizeof(config.ap.ssid));
@@ -264,31 +300,25 @@ esp_err_t WifiManager::enable_access_point() {
     config.ap.max_connection = 4;
     config.ap.authmode = WIFI_AUTH_OPEN;
 
-    if (mode == WIFI_MODE_NULL) {
-        ESP_RETURN_ON_ERROR(
-            esp_wifi_set_mode(WIFI_MODE_APSTA), kTag, "APSTA mode failed");
-        ESP_RETURN_ON_ERROR(
-            esp_wifi_set_config(WIFI_IF_AP, &config), kTag, "AP config failed");
-        ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
-    } else {
-        ESP_RETURN_ON_ERROR(
-            esp_wifi_set_mode(WIFI_MODE_APSTA), kTag, "APSTA mode failed");
-        ESP_RETURN_ON_ERROR(
-            esp_wifi_set_config(WIFI_IF_AP, &config), kTag, "AP config failed");
+    // The ESP32-C6 hosted radio only beacons a SoftAP in pure AP mode; APSTA
+    // reports "started" but never goes on the air. Stop any running STA mode
+    // first, then bring the interface up as a dedicated access point.
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
+    if (mode != WIFI_MODE_NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
     }
+
+    ESP_RETURN_ON_ERROR(
+        esp_wifi_set_mode(WIFI_MODE_AP), kTag, "AP mode failed");
+    ESP_RETURN_ON_ERROR(
+        esp_wifi_set_config(WIFI_IF_AP, &config), kTag, "AP config failed");
+    set_wifi_mac_from_efuse(WIFI_IF_AP);
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
 
     access_point_active_ = true;
-    // The initial station attempt has already timed out. Retry promptly while
-    // the AP remains available instead of waiting through a long backoff.
     last_retry_ms_ = now_ms() - kRetryIntervalMs;
     ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", kAccessPointSsid);
-
-    const WifiCredentials credentials = storage_->load_wifi();
-    if (credentials.valid) {
-        ESP_RETURN_ON_ERROR(
-            configure_station(credentials), kTag, "Station config failed");
-        request_connect();
-    }
     return ESP_OK;
 }
 

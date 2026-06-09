@@ -14,13 +14,18 @@ namespace {
 constexpr char kTag[] = "gps_base";
 constexpr int kUm980Baud = 115200;
 
+// ESP32-P4-WIFI6-Touch-LCD-4B pin assignment (P3 header)
+// UM980 COM2: TX2->GPIO2/P3-pin5 (ESP RX), RX2->GPIO3/P3-pin7 (ESP TX)
+// UM980 COM3: TX3->GPIO21/P3-pin10 (ESP RX), RX3->GPIO22/P3-pin12 (ESP TX)
+// NOTE: GPIO16/17 reserved for P4<->C6 WiFi coprocessor UART — do not use.
+// NOTE: GPIO37/38 are wired to the onboard CH343P USB-UART chip — do not use.
 constexpr uart_port_t kCommandUart = UART_NUM_1;
-constexpr gpio_num_t kCommandRx = GPIO_NUM_18;
-constexpr gpio_num_t kCommandTx = GPIO_NUM_19;
+constexpr gpio_num_t kCommandRx = GPIO_NUM_2;   // UM980 COM2 TX2 -> P3 pin 5
+constexpr gpio_num_t kCommandTx = GPIO_NUM_3;   // UM980 COM2 RX2 <- P3 pin 7
 
 constexpr uart_port_t kDataUart = UART_NUM_2;
-constexpr gpio_num_t kDataRx = GPIO_NUM_16;
-constexpr gpio_num_t kDataTx = GPIO_NUM_17;
+constexpr gpio_num_t kDataRx = GPIO_NUM_21;  // UM980 COM3 TX3
+constexpr gpio_num_t kDataTx = GPIO_NUM_22;  // UM980 COM3 RX3
 
 esp_err_t init_nvs() {
     esp_err_t err = nvs_flash_init();

@@ -23,8 +23,9 @@ LocalCaster::~LocalCaster() {
 esp_err_t LocalCaster::start() {
     queue_ = xQueueCreate(kQueueDepth, sizeof(Packet));
     if (!queue_) return ESP_ERR_NO_MEM;
-    if (xTaskCreatePinnedToCore(
-            task_entry, "local_ntrip", 5120, this, 4, &task_, 0) != pdPASS) {
+    // Priority 3: below httpd (5) so local NTRIP broadcast never delays
+    // HTTPS responses. Unpinned to let the scheduler balance freely.
+    if (xTaskCreate(task_entry, "local_ntrip", 5120, this, 3, &task_) != pdPASS) {
         vQueueDelete(queue_);
         queue_ = nullptr;
         return ESP_ERR_NO_MEM;

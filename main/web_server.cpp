@@ -314,6 +314,27 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         station.survey.gps + station.survey.glonass +
         station.survey.galileo + station.survey.beidou;
 
+    const SurveySnapshot &sv = station.survey;
+    char survey_buf[256];
+    if (sv.state == SurveyState::kCollecting) {
+        int n = snprintf(survey_buf, sizeof(survey_buf),
+            "<span class='warn'>collecting</span> <span class='dim'>%us "
+            "&middot; %d samples &middot; %d blocks &middot; </span>",
+            static_cast<unsigned>(sv.elapsed_sec), sv.samples, sv.blocks);
+        if (n < 0) n = 0;
+        if (sv.valid && sv.stability < 9000.0F) {
+            snprintf(survey_buf + n, sizeof(survey_buf) - n,
+                "stability %.3f m <span class='dim'>| %.8f, %.8f, %.3f m</span>",
+                sv.stability, sv.lat, sv.lon, sv.height);
+        } else {
+            snprintf(survey_buf + n, sizeof(survey_buf) - n, "stabilizing&hellip;");
+        }
+    } else if (sv.state == SurveyState::kDone) {
+        strlcpy(survey_buf, "<span class='ok'>complete</span>", sizeof(survey_buf));
+    } else {
+        strlcpy(survey_buf, "<span class='dim'>idle</span>", sizeof(survey_buf));
+    }
+
     std::string content =
         "<h2>Status</h2><table>"
         "<tr><td>Framework</td><td>ESP-IDF " + std::string(esp_get_idf_version()) + "</td></tr>"
@@ -332,6 +353,8 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         "</span>"
         "</td></tr>"
         "<tr><td>Position</td><td>" + std::string(position_row) + "</td></tr>"
+        "<tr><td>Survey</td><td id='st-survey'>" + std::string(survey_buf) +
+        "</td></tr>"
         "<tr><td>Satellites</td><td id='st-sats'>GPS " +
         std::to_string(station.survey.gps) + " / GLO " +
         std::to_string(station.survey.glonass) + " / GAL " +
@@ -378,6 +401,11 @@ async function refresh(){
   const rc=d.rssi>=-70?'ok':d.rssi>=-80?'warn':'err',rh=d.rssi>=-60?'excellent':d.rssi>=-70?'good':d.rssi>=-80?'fair':'weak';
   set('st-rssi',"<span class='"+rc+"'>"+d.rssi+" dBm ("+rh+")</span>");
   set('st-mode',"<span class='"+(d.mode==='base_tx'?'ok':'warn')+"'>"+(d.mode==='base_tx'?'Base TX':'Survey')+"</span>");
+  let sv;
+  if(d.survey_state==='collecting'){sv="<span class='warn'>collecting</span> <span class='dim'>"+d.survey_elapsed+"s &middot; "+d.survey_samples+" samples &middot; "+d.survey_blocks+" blocks &middot; </span>";sv+=(d.survey_valid&&d.survey_stability<9000)?("stability "+d.survey_stability.toFixed(3)+" m <span class='dim'>| "+d.survey_lat.toFixed(8)+", "+d.survey_lon.toFixed(8)+", "+d.survey_height.toFixed(3)+" m</span>"):"stabilizing&hellip;";}
+  else if(d.survey_state==='done')sv="<span class='ok'>complete</span>";
+  else sv="<span class='dim'>idle</span>";
+  set('st-survey',sv);
   set('st-sats','GPS '+d.gps+' / GLO '+d.glonass+' / GAL '+d.galileo+' / BDS '+d.beidou+" <span class='dim'>| total "+total+"</span>");
   set('st-rtcm',d.rtcm_bps+" B/s <span class='dim'>| "+bytes(d.rtcm_total)+" total</span>");
   set('st-clients',d.local_clients);set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
@@ -623,6 +651,19 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
             ",\"dropped\":" + std::to_string(status.dropped_batches) + "}";
     };
     const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    const SurveySnapshot &sv = station.survey;
+    const char *survey_state =
+        sv.state == SurveyState::kCollecting ? "collecting" :
+        sv.state == SurveyState::kDone       ? "done" :
+        sv.state == SurveyState::kError      ? "error" : "idle";
+    char survey_json[256];
+    snprintf(survey_json, sizeof(survey_json),
+        ",\"survey_state\":\"%s\",\"survey_elapsed\":%u,\"survey_samples\":%d,"
+        "\"survey_blocks\":%d,\"survey_stability\":%.3f,\"survey_valid\":%s,"
+        "\"survey_lat\":%.8f,\"survey_lon\":%.8f,\"survey_height\":%.3f",
+        survey_state, static_cast<unsigned>(sv.elapsed_sec), sv.samples,
+        sv.blocks, sv.stability, sv.valid ? "true" : "false",
+        sv.lat, sv.lon, sv.height);
     std::string body =
         "{\"framework\":\"ESP-IDF " + json_escape(esp_get_idf_version()) +
         "\",\"version\":\"" + json_escape(esp_app_get_description()->version) +
@@ -646,6 +687,7 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"glonass\":" + std::to_string(station.survey.glonass) +
         ",\"galileo\":" + std::to_string(station.survey.galileo) +
         ",\"beidou\":" + std::to_string(station.survey.beidou) +
+        std::string(survey_json) +
         ",\"local_clients\":" + std::to_string(station.local_clients) +
         ",\"rtk2go\":" + provider_json(station.rtk2go) +
         ",\"onocoy\":" + provider_json(station.onocoy) +

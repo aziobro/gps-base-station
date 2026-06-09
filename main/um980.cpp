@@ -20,6 +20,7 @@ constexpr TickType_t kCommandDelay = pdMS_TO_TICKS(200);
 esp_err_t Um980::command(const char *text) {
     if (!text || !*text) return ESP_ERR_INVALID_ARG;
     const int text_length = strlen(text);
+    ESP_LOGI(kTag, "TX> %s", text);  // DIAGNOSTIC
     if (uart_write_bytes(command_uart_, text, text_length) != text_length ||
         uart_write_bytes(command_uart_, "\r\n", 2) != 2) {
         return ESP_FAIL;
