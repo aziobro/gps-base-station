@@ -170,14 +170,32 @@ case "$MODE" in
 
     ota)
         require_password
-        step "Uploading over the air to $OTA_HOST"
-        RESPONSE="$(curl -k -s --fail-with-body -m 600 \
-            -u "$ADMIN_USER:$ADMIN_PASSWORD" \
-            -H 'Content-Type: application/octet-stream' \
-            --data-binary "@$APP_BIN" \
-            "https://$OTA_HOST/update")" \
-            || die "OTA upload failed: ${RESPONSE:-<no response>}"
-        echo "    device: $RESPONSE"
+        # The device suspends its RTCM streams and reboots on a successful
+        # upload, so the HTTP response can be dropped as the socket closes —
+        # and a busy base station may reject the first attempt under load.
+        # Retry, but check /status first so we never re-upload a build the
+        # device already took.
+        for attempt in 1 2 3; do
+            step "Uploading over the air to $OTA_HOST (attempt $attempt)"
+            RESPONSE="$(curl -k -s -m 600 \
+                -u "$ADMIN_USER:$ADMIN_PASSWORD" \
+                -H 'Content-Type: application/octet-stream' \
+                --data-binary "@$APP_BIN" \
+                "https://$OTA_HOST/update" || true)"
+            if printf '%s' "$RESPONSE" | grep -q "Update accepted"; then
+                echo "    device: $RESPONSE"
+                break
+            fi
+            echo "    upload did not confirm (response: '${RESPONSE:-<none>}')"
+            sleep 6
+            if [ "$(device_version "$OTA_HOST" || true)" = "$TARGET_VERSION" ]; then
+                echo "    device already reports $TARGET_VERSION — upload took"
+                break
+            fi
+            [ "$attempt" -lt 3 ] && echo "    retrying…"
+        done
+        # verify_live is authoritative: it polls /status and fails if the
+        # device never reports the target version.
         verify_live "$OTA_HOST"
         ;;
 esac
