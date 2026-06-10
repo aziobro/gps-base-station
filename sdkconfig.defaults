@@ -32,6 +32,9 @@ CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 # LVGL FreeRTOS port (used by BSP display)
 CONFIG_LV_OS_FREERTOS=y
+# Route all LVGL allocations to PSRAM — the 64 KB built-in pool is too small
+# for complex UI widgets (keyboard + modals + file browser).
+CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_LWIP_MAX_SOCKETS=32
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

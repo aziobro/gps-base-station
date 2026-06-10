@@ -1,4 +1,6 @@
 #include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_err.h"
@@ -587,8 +589,18 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
 
 static lv_indev_t *bsp_display_indev_init(lv_display_t *disp)
 {
-    esp_lcd_touch_handle_t tp;
-    BSP_ERROR_CHECK_RETURN_NULL(bsp_touch_new(NULL, &tp));
+    // GT911 occasionally needs a moment after the DSI PHY powers up before
+    // it accepts I2C commands. Retry up to 5 times with 50 ms between attempts.
+    esp_lcd_touch_handle_t tp = NULL;
+    esp_err_t touch_err = ESP_FAIL;
+    for (int retry = 0; retry < 5 && touch_err != ESP_OK; retry++) {
+        if (retry > 0) vTaskDelay(pdMS_TO_TICKS(50));
+        touch_err = bsp_touch_new(NULL, &tp);
+    }
+    if (touch_err != ESP_OK) {
+        ESP_LOGE("BSP", "Touch init failed after retries: %s", esp_err_to_name(touch_err));
+        return NULL;
+    }
     assert(tp);
 
     /* Add touch input (for selected screen) */
@@ -630,7 +642,11 @@ lv_display_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
 
     BSP_NULL_CHECK(disp = bsp_display_lcd_init(cfg), NULL);
 
-    BSP_NULL_CHECK(disp_indev = bsp_display_indev_init(disp), NULL);
+    // Touch init failure is non-fatal: the display still works without touch.
+    disp_indev = bsp_display_indev_init(disp);
+    if (!disp_indev) {
+        ESP_LOGW("BSP", "Touch input unavailable — display-only mode");
+    }
 
     return disp;
 }

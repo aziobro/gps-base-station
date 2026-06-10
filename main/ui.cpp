@@ -10,7 +10,10 @@
 #include "bsp/esp-bsp.h"
 #include "display.hpp"
 #include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_hosted.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -74,6 +77,11 @@ esp_err_t Ui::init(
     build_screens(display.handle());
     lv_timer_create(refresh_timer_cb, 1000, this);
     bsp_display_unlock();
+
+    // The embedded C6 image version is local to parse (no SDIO RPC).
+    load_c6_available_version();
+    // Query the *running* C6 version off the LVGL task — it's an RPC over SDIO.
+    xTaskCreate(c6_version_task, "c6_ver", 4096, this, 3, nullptr);
 
     // Install log hook after display init so the build_screens path
     // doesn't go through our hook (LVGL creates many objects, each may log).
@@ -316,6 +324,17 @@ void Ui::build_status_tab(lv_obj_t *parent) {
     make_row(g_op, &lbl_rtcm_, "RTCM output");
     make_row(g_op, &lbl_sats_, "Satellites");
 
+    // Start Survey / Resurvey button
+    btn_survey_start_ = lv_button_create(g_op);
+    lv_obj_set_size(btn_survey_start_, LV_PCT(100), 40);
+    lv_obj_set_style_margin_top(btn_survey_start_, 8, 0);
+    lv_obj_set_style_bg_color(btn_survey_start_,
+        lv_palette_darken(LV_PALETTE_ORANGE, 2), 0);
+    lbl_survey_btn_ = lv_label_create(btn_survey_start_);
+    lv_label_set_text(lbl_survey_btn_, LV_SYMBOL_REFRESH "  Start Survey");
+    lv_obj_center(lbl_survey_btn_);
+    lv_obj_add_event_cb(btn_survey_start_, on_survey_start, LV_EVENT_CLICKED, this);
+
     lv_obj_t *g_pos = make_group(parent, "POSITION");
     make_row(g_pos, &lbl_lat_, "Latitude");
     make_row(g_pos, &lbl_lon_, "Longitude");
@@ -417,6 +436,22 @@ static lv_obj_t *ntrip_detail_group(lv_obj_t *parent, const char *title,
 }
 
 void Ui::build_ntrip_tab(lv_obj_t *parent) {
+    // Global enable/disable switch
+    lv_obj_t *g_global = make_group(parent, "ALL NTRIP SERVICES");
+    lv_obj_t *row = lv_obj_create(g_global);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *sw_lbl = lv_label_create(row);
+    lv_label_set_text(sw_lbl, "Enable all services");
+    lv_obj_set_style_text_color(sw_lbl, lv_color_hex(kKeyCol), 0);
+    lv_obj_set_flex_grow(sw_lbl, 1);
+    sw_ntrip_all_ = lv_switch_create(row);
+    lv_obj_add_state(sw_ntrip_all_, LV_STATE_CHECKED);  // default: on
+    lv_obj_add_event_cb(sw_ntrip_all_, on_ntrip_all_toggle, LV_EVENT_VALUE_CHANGED, this);
+
     ntrip_detail_group(parent, "RTK2go",
         &lbl_d_rtk2go_, &lbl_d_rtk2go_bytes_, &lbl_d_rtk2go_drop_,
         this, 0);
@@ -506,8 +541,18 @@ void Ui::build_system_tab(lv_obj_t *parent) {
     lv_obj_add_event_cb(files_btn, on_files_btn, LV_EVENT_CLICKED, this);
 
     lv_obj_t *g_fw = make_group(parent, "FIRMWARE");
-    make_row(g_fw, &lbl_fw_,      "Version");
-    make_row(g_fw, &lbl_compile_, "Built");
+    make_row(g_fw, &lbl_fw_,         "Version");
+    make_row(g_fw, &lbl_compile_,    "Built");
+    make_row(g_fw, &lbl_c6_running_, "C6 running");
+    make_row(g_fw, &lbl_c6_fw_,      "C6 available");
+
+    btn_c6_ota_ = lv_button_create(g_fw);
+    lv_obj_set_size(btn_c6_ota_, LV_PCT(100), 40);
+    lv_obj_set_style_margin_top(btn_c6_ota_, 8, 0);
+    lv_obj_t *c6_lbl = lv_label_create(btn_c6_ota_);
+    lv_label_set_text(c6_lbl, LV_SYMBOL_UPLOAD "  Update C6 Firmware");
+    lv_obj_center(c6_lbl);
+    lv_obj_add_event_cb(btn_c6_ota_, on_c6_ota_btn, LV_EVENT_CLICKED, this);
 }
 
 // ── Debug tab ─────────────────────────────────────────────────────────────────
@@ -911,6 +956,18 @@ void Ui::wifi_scan_task(void *arg) {
     vTaskDelete(nullptr);
 }
 
+struct WifiConnectArg {
+    WifiManager *wifi;
+    WifiCredentials creds;
+};
+
+static void wifi_connect_task(void *arg) {
+    auto *a = static_cast<WifiConnectArg *>(arg);
+    a->wifi->update_credentials(a->creds);
+    delete a;
+    vTaskDelete(nullptr);
+}
+
 void Ui::on_wifi_connect(lv_event_t *e) {
     auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
 
@@ -930,10 +987,13 @@ void Ui::on_wifi_connect(lv_event_t *e) {
     lv_label_set_text(ui->lbl_wifi_msg_, "Saved. Connecting...");
     lv_obj_set_style_text_color(ui->lbl_wifi_msg_,
         lv_palette_main(LV_PALETTE_YELLOW), 0);
-
-    ui->wifi_->update_credentials(creds);
     lv_obj_add_flag(ui->modal_wifi_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui->kb_wifi_, LV_OBJ_FLAG_HIDDEN);
+
+    // update_credentials calls esp_wifi_stop/start/connect which go over SDIO
+    // to the C6 coprocessor — must not run inside the LVGL task (display lock held)
+    auto *arg = new WifiConnectArg{ui->wifi_, creds};
+    xTaskCreate(wifi_connect_task, "wifi_conn", 4096, arg, 5, nullptr);
 }
 
 void Ui::on_wifi_list_click(lv_event_t *e) {
@@ -1019,6 +1079,177 @@ void Ui::on_rinex_toggle(lv_event_t *e) {
     ui->station_->request_raw_collection(enabled);
 }
 
+void Ui::on_ntrip_all_toggle(lv_event_t *e) {
+    auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
+    lv_obj_t *sw = lv_event_get_target_obj(e);
+    bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    ui->station_->set_streams_suspended(!enabled);
+}
+
+void Ui::on_survey_start(lv_event_t *e) {
+    auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
+
+    // If already surveying, no confirm needed — just re-queue the action.
+    // If in transmit (base) mode, ask for confirmation since it resets position.
+    const BaseStationStatus st = ui->station_->status();
+    if (st.mode == BaseMode::kTransmit) {
+        // Build a compact confirm dialog on lv_layer_top()
+        static const char *btns[] = {"Yes", "No", ""};
+        lv_obj_t *mbox = lv_msgbox_create(lv_layer_top());
+        lv_msgbox_add_title(mbox, "Start New Survey?");
+        lv_msgbox_add_text(mbox, "This will reset the current fixed position and begin a new accuracy survey.");
+        lv_msgbox_add_footer_button(mbox, "Yes");
+        lv_msgbox_add_footer_button(mbox, "Cancel");
+        lv_obj_set_width(mbox, 480);
+        lv_obj_center(mbox);
+        (void)btns;  // suppress unused warning
+
+        // Tag each button with the Ui pointer so the callback can act
+        lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+        if (footer) {
+            uint32_t n = lv_obj_get_child_count(footer);
+            for (uint32_t i = 0; i < n; i++) {
+                lv_obj_t *btn = lv_obj_get_child(footer, (int32_t)i);
+                lv_obj_set_user_data(btn, ui);
+                lv_obj_add_event_cb(btn, on_survey_confirm, LV_EVENT_CLICKED, mbox);
+            }
+        }
+    } else {
+        ui->station_->request_survey();
+    }
+}
+
+void Ui::on_survey_confirm(lv_event_t *e) {
+    lv_obj_t *mbox = static_cast<lv_obj_t *>(lv_event_get_user_data(e));
+    lv_obj_t *btn  = lv_event_get_target_obj(e);
+    auto *ui = static_cast<Ui *>(lv_obj_get_user_data(btn));
+
+    const char *label = lv_label_get_text(lv_obj_get_child(btn, 0));
+    if (label && strcmp(label, "Yes") == 0 && ui) {
+        ui->station_->request_survey();
+    }
+    lv_msgbox_close(mbox);
+}
+
+// ── C6 coprocessor OTA ─────────────────────────────────────────────────────────
+
+void Ui::on_c6_ota_btn(lv_event_t *e) {
+    auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
+    if (ui->c6_ota_progress_.load() >= 0) return;
+
+    lv_obj_t *mbox = lv_msgbox_create(lv_layer_top());
+    lv_msgbox_add_title(mbox, "Update C6 Firmware?");
+    lv_msgbox_add_text(mbox,
+        "This flashes new firmware to the WiFi coprocessor. "
+        "The device will restart when complete.");
+    lv_msgbox_add_footer_button(mbox, "Update");
+    lv_msgbox_add_footer_button(mbox, "Cancel");
+    lv_obj_set_width(mbox, 480);
+    lv_obj_center(mbox);
+
+    lv_obj_t *footer = lv_msgbox_get_footer(mbox);
+    if (footer) {
+        uint32_t n = lv_obj_get_child_count(footer);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *btn = lv_obj_get_child(footer, (int32_t)i);
+            lv_obj_set_user_data(btn, ui);
+            lv_obj_add_event_cb(btn, on_c6_ota_confirm, LV_EVENT_CLICKED, mbox);
+        }
+    }
+}
+
+void Ui::on_c6_ota_confirm(lv_event_t *e) {
+    lv_obj_t *mbox = static_cast<lv_obj_t *>(lv_event_get_user_data(e));
+    lv_obj_t *btn  = lv_event_get_target_obj(e);
+    auto *ui = static_cast<Ui *>(lv_obj_get_user_data(btn));
+
+    const char *label = lv_label_get_text(lv_obj_get_child(btn, 0));
+    if (label && strcmp(label, "Update") == 0 && ui) {
+        ui->c6_ota_progress_.store(0);
+        lv_obj_add_state(ui->btn_c6_ota_, LV_STATE_DISABLED);
+        xTaskCreate(c6_ota_task, "c6_ota", 8192, ui, 5, nullptr);
+    }
+    lv_msgbox_close(mbox);
+}
+
+void Ui::c6_ota_task(void *arg) {
+    auto *ui = static_cast<Ui *>(arg);
+    constexpr char kTag[] = "c6_ota";
+
+    extern const uint8_t c6_fw_start[] asm("_binary_c6_slave_fw_bin_start");
+    extern const uint8_t c6_fw_end[]   asm("_binary_c6_slave_fw_bin_end");
+    const size_t fw_size = (size_t)(c6_fw_end - c6_fw_start);
+
+    ESP_LOGI(kTag, "Starting C6 OTA (%u bytes)", (unsigned)fw_size);
+
+    esp_err_t err = esp_hosted_slave_ota_begin();
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "ota_begin: %s", esp_err_to_name(err));
+        ui->c6_ota_progress_.store(-2);
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    constexpr size_t kChunk = 1500;
+    size_t offset = 0;
+    while (offset < fw_size) {
+        size_t chunk = std::min(kChunk, fw_size - offset);
+        err = esp_hosted_slave_ota_write(
+            const_cast<uint8_t *>(c6_fw_start + offset), (uint32_t)chunk);
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "ota_write at %u: %s", (unsigned)offset, esp_err_to_name(err));
+            esp_hosted_slave_ota_end();
+            ui->c6_ota_progress_.store(-2);
+            vTaskDelete(nullptr);
+            return;
+        }
+        offset += chunk;
+        ui->c6_ota_progress_.store((int)(offset * 100 / fw_size));
+    }
+
+    err = esp_hosted_slave_ota_end();
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "ota_end: %s", esp_err_to_name(err));
+        ui->c6_ota_progress_.store(-2);
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    ESP_LOGI(kTag, "OTA complete, activating C6...");
+    esp_hosted_slave_ota_activate();
+    // C6 reboots; give it time then restart P4 to resync
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    esp_restart();
+}
+
+// Parse the version + build date out of the embedded C6 image's app descriptor.
+// The descriptor sits immediately after the image + first segment headers.
+void Ui::load_c6_available_version() {
+    extern const uint8_t c6_fw_start[] asm("_binary_c6_slave_fw_bin_start");
+    const auto *desc = reinterpret_cast<const esp_app_desc_t *>(
+        c6_fw_start + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t));
+    if (desc->magic_word == ESP_APP_DESC_MAGIC_WORD) {
+        snprintf(c6_avail_ver_, sizeof(c6_avail_ver_), "%s  (%s)",
+                 desc->version, desc->date);
+    } else {
+        strlcpy(c6_avail_ver_, "embedded image", sizeof(c6_avail_ver_));
+    }
+}
+
+void Ui::c6_version_task(void *arg) {
+    auto *ui = static_cast<Ui *>(arg);
+    esp_hosted_coprocessor_fwver_t v = {};
+    if (esp_hosted_get_coprocessor_fwversion(&v) == ESP_OK) {
+        snprintf(ui->c6_running_ver_, sizeof(ui->c6_running_ver_),
+                 "%u.%u.%u", (unsigned)v.major1, (unsigned)v.minor1,
+                 (unsigned)v.patch1);
+    } else {
+        strlcpy(ui->c6_running_ver_, "unknown", sizeof(ui->c6_running_ver_));
+    }
+    ui->c6_running_ready_.store(true);
+    vTaskDelete(nullptr);
+}
+
 // ── Periodic refresh ──────────────────────────────────────────────────────────
 
 void Ui::refresh_timer_cb(lv_timer_t *timer) {
@@ -1036,10 +1267,22 @@ void Ui::refresh() {
         lv_label_set_text(lbl_mode_, "SURVEY");
         lv_obj_set_style_text_color(lbl_mode_,
             lv_palette_main(LV_PALETTE_ORANGE), 0);
+        lv_label_set_text(lbl_survey_btn_, LV_SYMBOL_REFRESH "  Restart Survey");
     } else {
         lv_label_set_text(lbl_mode_, "BASE TX");
         lv_obj_set_style_text_color(lbl_mode_,
             lv_palette_main(LV_PALETTE_GREEN), 0);
+        lv_label_set_text(lbl_survey_btn_, LV_SYMBOL_REFRESH "  Start New Survey");
+    }
+
+    // Sync global NTRIP toggle without retriggering the callback
+    if (sw_ntrip_all_) {
+        bool enabled = !station_->streams_suspended();
+        bool sw_on   = lv_obj_has_state(sw_ntrip_all_, LV_STATE_CHECKED);
+        if (enabled != sw_on) {
+            if (enabled) lv_obj_add_state(sw_ntrip_all_, LV_STATE_CHECKED);
+            else         lv_obj_clear_state(sw_ntrip_all_, LV_STATE_CHECKED);
+        }
     }
 
     if (st.mode == BaseMode::kTransmit && st.rtcm_bytes_per_second > 0) {
@@ -1249,6 +1492,25 @@ void Ui::refresh() {
         lv_label_set_text(lbl_compile_, buf);
     }
 
+    // C6 running version (cached once the RPC query completes).
+    lv_label_set_text(lbl_c6_running_,
+                      c6_running_ready_.load() ? c6_running_ver_ : "querying\xe2\x80\xa6");
+
+    // C6 available line doubles as the OTA progress/status indicator.
+    int ota_p = c6_ota_progress_.load();
+    if (ota_p == -1) {
+        lv_label_set_text(lbl_c6_fw_, c6_avail_ver_);
+        lv_obj_clear_state(btn_c6_ota_, LV_STATE_DISABLED);
+    } else if (ota_p == -2) {
+        lv_label_set_text(lbl_c6_fw_, "Update failed");
+        lv_obj_set_style_text_color(lbl_c6_fw_, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_clear_state(btn_c6_ota_, LV_STATE_DISABLED);
+    } else {
+        snprintf(buf, sizeof(buf), "Flashing\xe2\x80\xa6 %d%%", ota_p);
+        lv_label_set_text(lbl_c6_fw_, buf);
+        lv_obj_add_state(btn_c6_ota_, LV_STATE_DISABLED);
+    }
+
     // ── Debug tab (every other tick to reduce overhead) ───────────────────────
     static int debug_tick = 0;
     if (++debug_tick >= 2) {
@@ -1277,7 +1539,11 @@ void Ui::refresh_debug_log() {
     }
 
     lv_label_set_text(lbl_debug_, log_text);
-    // Scroll the parent container to the bottom
-    lv_obj_t *cont = lv_obj_get_parent(lbl_debug_);
-    if (cont) lv_obj_scroll_to_y(cont, LV_COORD_MAX, LV_ANIM_OFF);
+    // Scroll the tab page (not the inner container) to show the latest log lines.
+    // Use get_scroll_y + get_scroll_bottom for a bounded, safe target value.
+    if (tab_debug_) {
+        int32_t target = lv_obj_get_scroll_y(tab_debug_) +
+                         lv_obj_get_scroll_bottom(tab_debug_);
+        lv_obj_scroll_to_y(tab_debug_, target, LV_ANIM_OFF);
+    }
 }

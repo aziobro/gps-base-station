@@ -36,6 +36,8 @@ private:
     lv_obj_t *lbl_mode_         = nullptr;
     lv_obj_t *lbl_rtcm_         = nullptr;
     lv_obj_t *lbl_sats_         = nullptr;
+    lv_obj_t *btn_survey_start_ = nullptr;
+    lv_obj_t *lbl_survey_btn_   = nullptr;
     lv_obj_t *lbl_lat_          = nullptr;
     lv_obj_t *lbl_lon_          = nullptr;
     lv_obj_t *lbl_alt_          = nullptr;
@@ -47,6 +49,7 @@ private:
     lv_obj_t *lbl_local_ntrip_  = nullptr;
 
     // ── NTRIP tab ─────────────────────────────────────────────────────────────
+    lv_obj_t *sw_ntrip_all_        = nullptr;
     lv_obj_t *lbl_d_rtk2go_        = nullptr;
     lv_obj_t *lbl_d_rtk2go_bytes_  = nullptr;
     lv_obj_t *lbl_d_rtk2go_drop_   = nullptr;
@@ -84,6 +87,13 @@ private:
     lv_obj_t *lbl_rinex_file_   = nullptr;
     lv_obj_t *lbl_fw_           = nullptr;
     lv_obj_t *lbl_compile_      = nullptr;
+    lv_obj_t *lbl_c6_running_   = nullptr;
+    lv_obj_t *lbl_c6_fw_        = nullptr;  // "C6 available" / OTA status line
+    lv_obj_t *btn_c6_ota_       = nullptr;
+    std::atomic<int> c6_ota_progress_{-1}; // -1=idle, 0-100=%, -2=failed
+    char c6_running_ver_[48]    = "";       // filled by c6_version_task (RPC)
+    char c6_avail_ver_[64]      = "";       // parsed from embedded C6 image
+    std::atomic<bool> c6_running_ready_{false};
 
     // ── Debug tab ─────────────────────────────────────────────────────────────
     lv_obj_t *lbl_debug_        = nullptr;
@@ -176,4 +186,18 @@ private:
 
     // ── RINEX toggle callback ─────────────────────────────────────────────────
     static void on_rinex_toggle(lv_event_t *e);
+
+    // ── NTRIP global toggle ───────────────────────────────────────────────────
+    static void on_ntrip_all_toggle(lv_event_t *e);
+
+    // ── Survey start button ───────────────────────────────────────────────────
+    static void on_survey_start(lv_event_t *e);
+    static void on_survey_confirm(lv_event_t *e);
+
+    // ── C6 coprocessor OTA ────────────────────────────────────────────────────
+    static void on_c6_ota_btn(lv_event_t *e);
+    static void on_c6_ota_confirm(lv_event_t *e);
+    static void c6_ota_task(void *arg);
+    static void c6_version_task(void *arg);  // queries running C6 fw version (RPC)
+    void load_c6_available_version();        // parses embedded C6 image app-desc
 };

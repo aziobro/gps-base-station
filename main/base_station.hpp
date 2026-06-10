@@ -45,6 +45,7 @@ public:
     esp_err_t request_raw_collection(bool enable);
     void reload_services();
     void set_streams_suspended(bool suspended);
+    bool streams_suspended() const { return external_suspend_; }
     bool healthy() const;
 
     BaseStationStatus status() const;

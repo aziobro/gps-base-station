@@ -12,6 +12,7 @@ esp_err_t Display::init() {
     // ESP_LVGL_PORT_INIT_CONFIG() uses C99 designated initializers.
     bsp_display_cfg_t cfg = {};
     cfg.lvgl_port_cfg     = ESP_LVGL_PORT_INIT_CONFIG();
+    cfg.lvgl_port_cfg.task_stack = 16384;  // default 7168 is too small for complex UI refresh
     cfg.buffer_size       = BSP_LCD_DRAW_BUFF_SIZE;
     cfg.double_buffer     = BSP_LCD_DRAW_BUFF_DOUBLE;
     cfg.flags.buff_dma    = true;

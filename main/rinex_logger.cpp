@@ -258,7 +258,10 @@ void RinexLogger::process_message() {
 
         SigObs obs;
         obs.pseudorange   = psr;
-        obs.carrier_phase = adr;
+        // Unicore/Novatel ADR has the opposite sign to the RINEX carrier-phase
+        // convention; negate so downstream processors (OPUS, RTKLIB) resolve
+        // ambiguities correctly. (RTKLIB's RANGE decoder negates ADR likewise.)
+        obs.carrier_phase = -adr;
         obs.doppler       = dopp;
         obs.cn0           = cn0;
         obs.valid         = true;
@@ -340,7 +343,6 @@ void RinexLogger::write_header(int gps_week, double tow) {
     fprintf(file_, "%-20s%-20s%-20sPGM / RUN BY / DATE\n",
             "GPS_BASE", "ESP32_RTK", date_col);
 
-    fprintf(file_, "%-60sMAR# / NAME      \n", "GPS_BASE_STATION");
     fprintf(file_, "%-60sMARKER NAME      \n", "GPS_BASE_STATION");
     fprintf(file_, "%-60sMARKER TYPE      \n", "GEODETIC");
     fprintf(file_, "%-20s%-40sOBSERVER / AGENCY\n", "UNKNOWN", "UNKNOWN");
@@ -349,8 +351,9 @@ void RinexLogger::write_header(int gps_week, double tow) {
     fprintf(file_, "%-20s%-40sANT # / TYPE     \n", "0000", "UNKNOWN");
     fprintf(file_, "%14.4f%14.4f%14.4f                  APPROX POSITION XYZ\n",
             ecef_x_, ecef_y_, ecef_z_);
-    fprintf(file_,
-        "        0.0000        0.0000        0.0000              ANTENNA: DELTA H/E/N\n");
+    // 3×F14.4 (=42) + 18 blanks = 60 content columns; label must start at col 61.
+    fprintf(file_, "%14.4f%14.4f%14.4f                  ANTENNA: DELTA H/E/N\n",
+            0.0, 0.0, 0.0);
 
     // SYS / # / OBS TYPES — 8 obs per system: C L D S for two frequency bands.
     // GPS: L1C/A (sig1) + L2P (sig2)
@@ -366,7 +369,8 @@ void RinexLogger::write_header(int gps_week, double tow) {
     fprintf(file_,
         "C    8 C2I L2I D2I S2I C6I L6I D6I S6I                      SYS / # / OBS TYPES\n");
 
-    fprintf(file_, "%6d%6d%6d%6d%6d%13.7f     GPS             TIME OF FIRST OBS\n",
+    // Format (5I6, F13.7, 5X, A3) = 51 cols, then 9 blanks = 60; label at col 61.
+    fprintf(file_, "%6d%6d%6d%6d%6d%13.7f     GPS         TIME OF FIRST OBS\n",
             Y, Mo, D, h, m, s);
 
     fprintf(file_, "%-60sEND OF HEADER    \n", "");

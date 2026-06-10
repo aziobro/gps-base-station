@@ -12,6 +12,8 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 - **SD card file browser** — browse, download, rename, delete, and create directories via the web UI; `logs/` and `rawdata/` directories created automatically on first mount
 - **SD card storage stats** — used / free / total displayed on both the status page and file browser with a visual progress bar
 - **RINEX raw data collection** — toggle from the status page to record raw GNSS observations (30-second epochs, 1-hour files) to `/sdcard/rawdata/` in RINEX 3.03 format for post-processing with OPUS or similar services; multi-file merge download built in
+- **On-device touchscreen UI** — 720×720 capacitive touch LCD with a tabbed LVGL interface (Status, NTRIP, Position, System, Debug); configure WiFi and NTRIP credentials, browse the SD card, start a survey, and toggle RINEX collection without a browser
+- **C6 coprocessor firmware update** — flash the bundled ESP32-C6 WiFi firmware from the System tab; the running and available versions are shown side by side
 - **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, SD card storage, and RINEX collection status
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
 - **HTTPS administration** — TLS-protected status, configuration, sky plot, SD card, and OTA pages
@@ -27,10 +29,13 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 | Component | Notes |
 |-----------|-------|
 | Waveshare ESP32-P4-WIFI6-Touch-LCD-4B | ESP32-P4 host (400 MHz, 768 KB SRAM) + ESP32-C6 WiFi coprocessor over SDIO |
+| 4" 720×720 MIPI-DSI LCD (ST7703) + GT911 touch | Onboard; drives the tabbed LVGL interface |
 | Unicore UM980 | Multi-constellation GNSS receiver (GPS/GLONASS/Galileo/BeiDou) |
 | microSD card | Optional — used for data logging and file browser |
 
 The ESP32-C6 WiFi coprocessor communicates with the P4 host over SDIO via `esp_hosted`. Because the SDMMC peripheral is held exclusively by `esp_hosted` in ESP-IDF 6.x, the microSD card is accessed over SPI2 instead (same physical pins, independent peripheral).
+
+The onboard ESP32-C6 WiFi firmware (`network_adapter`, the `esp_hosted` slave) is bundled in the build as `main/c6_slave_fw.bin` and can be reflashed in place from the **System** tab — see *C6 Coprocessor Firmware* below.
 
 ---
 
@@ -66,7 +71,7 @@ The SD card supply (VDDPST) is powered through on-chip LDO channel 4 (`ESP_LDO_V
 
 ## Software
 
-Native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project. Uses `esp_wifi` (via `esp_hosted`), `esp_https_server`, `esp_ota_ops`, `esp_vfs_fat` (SDSPI), NVS, FreeRTOS, and lwIP directly.
+Native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project. Uses `esp_wifi` (via `esp_hosted`), `esp_https_server`, `esp_ota_ops`, `esp_vfs_fat` (SDSPI), NVS, FreeRTOS, and lwIP directly. The on-device UI is built with [LVGL](https://lvgl.io/) 9 on the Waveshare BSP (MIPI-DSI + GT911 touch).
 
 ---
 
@@ -169,6 +174,33 @@ The ESP32-P4 uses a project-local certificate authority because public certifica
 1. Download `http://<device-ip>/ca.crt`.
 2. Import it into the operating system trust store as a trusted root.
 3. Open `https://<device-ip>/`.
+
+---
+
+## Touchscreen Interface
+
+The onboard 720×720 touch LCD mirrors most of the web UI through a tabbed LVGL interface, so the base station can be set up and monitored without a browser:
+
+| Tab | Contents |
+|-----|----------|
+| **Status** | Mode (SURVEY / BASE TX), RTCM throughput, satellite counts, fixed position, NTRIP caster status, and a **Start / Restart Survey** button |
+| **NTRIP** | Per-service status, bytes sent, and dropped batches; a global enable/disable switch; per-service **Config** buttons (mountpoint + password) |
+| **Position** | Fixed base position, survey quality (stability, sigma, blocks), and per-constellation satellite SNR detail |
+| **System** | WiFi state + **Configure WiFi** (scan, select, password), SD card stats + **Browse SD Card**, **RINEX collection** toggle, firmware versions, and **Update C6 Firmware** |
+| **Debug** | Scrolling on-device log output |
+
+On-screen keyboards appear for all text entry (WiFi and NTRIP credentials). Changes made on the touchscreen and in the web UI share the same NVS storage.
+
+### C6 Coprocessor Firmware
+
+The **System** tab shows two firmware versions:
+
+- **C6 running** — queried live from the ESP32-C6 over the `esp_hosted` link
+- **C6 available** — parsed from the firmware bundled in this build (`main/c6_slave_fw.bin`), shown with its build date
+
+Tapping **Update C6 Firmware** streams the bundled image to the coprocessor over SDIO, then reboots the host to resync. The device stays usable during the transfer (progress is shown on the System tab); WiFi drops only for the moment the C6 restarts.
+
+> The running-version number reflects the C6's compiled `esp_hosted` protocol version, not the bundled binary's build metadata — so a custom rebuild that keeps the same protocol version will report the same number. Use the **C6 available** build date to confirm which image is bundled.
 
 ---
 
@@ -328,6 +360,10 @@ main/
 ├── sd_manager.*       — microSD via SDSPI (LDO enable, mount, browse, disk stats)
 ├── rinex_logger.*     — RINEX 3.03 observation file writer (RANGEA parser, 30 s epochs, hourly rotation)
 ├── web_server.*       — authenticated status, config, sky plot, SD browser, RINEX toggle, OTA
+├── display.*          — Waveshare BSP bring-up (MIPI-DSI + GT911 touch)
+├── ui.*               — LVGL tabbed touchscreen UI and C6 firmware update
+├── lv_mem_custom.c    — routes LVGL allocations to PSRAM
+├── c6_slave_fw.bin    — bundled ESP32-C6 esp_hosted firmware (embedded for on-device update)
 └── wifi_manager.*     — event-driven station/AP recovery
 partitions.csv         — OTA flash layout (ota_0 / ota_1 / otadata)
 sdkconfig.defaults     — ESP-IDF kconfig overrides (socket pool, lwIP tuning)
