@@ -2,12 +2,14 @@ idf_component_register(
     SRCS
         "app_main.cpp"
         "base_station.cpp"
+        "display.cpp"
         "local_caster.cpp"
         "ntrip_push.cpp"
         "rinex_logger.cpp"
         "sd_manager.cpp"
         "storage.cpp"
         "survey.cpp"
+        "ui.cpp"
         "um980.cpp"
         "wifi_manager.cpp"
         "web_server.cpp"
@@ -31,6 +33,7 @@ idf_component_register(
         app_update
         mbedtls
         nvs_flash
+        esp_lcd
     EMBED_TXTFILES
         "certs/server-cert.pem"
         "certs/server-key.pem"

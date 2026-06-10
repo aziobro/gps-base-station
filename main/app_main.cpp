@@ -1,12 +1,14 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "base_station.hpp"
+#include "display.hpp"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "sd_manager.hpp"
 #include "storage.hpp"
+#include "ui.hpp"
 #include "wifi_manager.hpp"
 #include "web_server.hpp"
 
@@ -124,6 +126,16 @@ extern "C" void app_main() {
         sd_manager.ensure_dirs();
     } else {
         ESP_LOGW(kTag, "SD card not available — file browser will show empty state");
+    }
+
+    static Display display;
+    if (display.init() == ESP_OK) {
+        static Ui ui;
+        if (ui.init(display, base_station, sd_manager, wifi_manager, storage) != ESP_OK) {
+            ESP_LOGW(kTag, "UI init failed — display will show blank");
+        }
+    } else {
+        ESP_LOGW(kTag, "Display init failed — touchscreen unavailable");
     }
 
     static AdminWebServer web_server;
