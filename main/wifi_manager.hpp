@@ -42,6 +42,7 @@ public:
     std::string ssid() const;
     std::string ip_address() const;
     std::vector<WifiNetwork> scan_networks();
+    esp_err_t update_credentials(const WifiCredentials &credentials);
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;

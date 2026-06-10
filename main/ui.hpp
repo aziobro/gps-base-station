@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <string>
+#include <vector>
+
 #include "esp_err.h"
 #include "lvgl.h"
 
@@ -10,10 +14,6 @@
 
 class Display;
 
-// LVGL-based touchscreen UI for the GPS RTK base station.
-// Four tabs navigated by touch.  The Status tab is a combined dashboard
-// showing operation, position, and NTRIP state in grouped boxes.
-// Call init() once after Display::init() completes.
 class Ui {
 public:
     esp_err_t init(Display &display, BaseStation &station,
@@ -25,63 +25,155 @@ private:
     WifiManager *wifi_    = nullptr;
     Storage     *storage_ = nullptr;
 
-    // Tabview page containers
-    lv_obj_t *tab_status_ = nullptr;
-    lv_obj_t *tab_ntrip_  = nullptr;
-    lv_obj_t *tab_pos_    = nullptr;
-    lv_obj_t *tab_sys_    = nullptr;
+    // ── Tab containers ────────────────────────────────────────────────────────
+    lv_obj_t *tab_status_  = nullptr;
+    lv_obj_t *tab_ntrip_   = nullptr;
+    lv_obj_t *tab_pos_     = nullptr;
+    lv_obj_t *tab_sys_     = nullptr;
+    lv_obj_t *tab_debug_   = nullptr;
 
-    // Status tab — Base Operation group
-    lv_obj_t *lbl_mode_  = nullptr;
-    lv_obj_t *lbl_rtcm_  = nullptr;
-    lv_obj_t *lbl_sats_  = nullptr;
+    // ── Status tab ────────────────────────────────────────────────────────────
+    lv_obj_t *lbl_mode_         = nullptr;
+    lv_obj_t *lbl_rtcm_         = nullptr;
+    lv_obj_t *lbl_sats_         = nullptr;
+    lv_obj_t *lbl_lat_          = nullptr;
+    lv_obj_t *lbl_lon_          = nullptr;
+    lv_obj_t *lbl_alt_          = nullptr;
+    lv_obj_t *lbl_survey_       = nullptr;
+    lv_obj_t *bar_survey_       = nullptr;
+    lv_obj_t *lbl_rtk2go_       = nullptr;
+    lv_obj_t *lbl_onocoy_       = nullptr;
+    lv_obj_t *lbl_rtkdata_      = nullptr;
+    lv_obj_t *lbl_local_ntrip_  = nullptr;
 
-    // Status tab — Position group
-    lv_obj_t *lbl_lat_      = nullptr;
-    lv_obj_t *lbl_lon_      = nullptr;
-    lv_obj_t *lbl_alt_      = nullptr;
-    lv_obj_t *lbl_survey_   = nullptr;
-    lv_obj_t *bar_survey_   = nullptr;
+    // ── NTRIP tab ─────────────────────────────────────────────────────────────
+    lv_obj_t *lbl_d_rtk2go_        = nullptr;
+    lv_obj_t *lbl_d_rtk2go_bytes_  = nullptr;
+    lv_obj_t *lbl_d_rtk2go_drop_   = nullptr;
+    lv_obj_t *lbl_d_onocoy_        = nullptr;
+    lv_obj_t *lbl_d_onocoy_bytes_  = nullptr;
+    lv_obj_t *lbl_d_onocoy_drop_   = nullptr;
+    lv_obj_t *lbl_d_rtkdata_       = nullptr;
+    lv_obj_t *lbl_d_rtkdata_bytes_ = nullptr;
+    lv_obj_t *lbl_d_rtkdata_drop_  = nullptr;
+    lv_obj_t *lbl_d_local_ntrip_   = nullptr;
 
-    // Status tab — NTRIP group
-    lv_obj_t *lbl_rtk2go_      = nullptr;
-    lv_obj_t *lbl_onocoy_      = nullptr;
-    lv_obj_t *lbl_rtkdata_     = nullptr;
-    lv_obj_t *lbl_local_ntrip_ = nullptr;
+    // ── Position tab ──────────────────────────────────────────────────────────
+    lv_obj_t *lbl_d_lat_        = nullptr;
+    lv_obj_t *lbl_d_lon_        = nullptr;
+    lv_obj_t *lbl_d_alt_        = nullptr;
+    lv_obj_t *lbl_d_survey_     = nullptr;
+    lv_obj_t *bar_d_survey_     = nullptr;
+    lv_obj_t *lbl_sv_elapsed_   = nullptr;
+    lv_obj_t *lbl_sv_blocks_    = nullptr;
+    lv_obj_t *lbl_sv_samples_   = nullptr;
+    lv_obj_t *lbl_sv_stability_ = nullptr;
+    lv_obj_t *lbl_sv_sigma_     = nullptr;
+    lv_obj_t *lbl_sv_used_      = nullptr;
+    lv_obj_t *lbl_sv_gps_       = nullptr;
+    lv_obj_t *lbl_sv_glo_       = nullptr;
+    lv_obj_t *lbl_sv_gal_       = nullptr;
+    lv_obj_t *lbl_sv_bds_       = nullptr;
+    lv_obj_t *lbl_sv_detail_    = nullptr;
 
-    // NTRIP detail tab (mirrors status tab NTRIP group)
-    lv_obj_t *lbl_d_rtk2go_      = nullptr;
-    lv_obj_t *lbl_d_onocoy_      = nullptr;
-    lv_obj_t *lbl_d_rtkdata_     = nullptr;
-    lv_obj_t *lbl_d_local_ntrip_ = nullptr;
+    // ── System tab ────────────────────────────────────────────────────────────
+    lv_obj_t *lbl_ip_           = nullptr;
+    lv_obj_t *lbl_wifi_state_   = nullptr;
+    lv_obj_t *lbl_sd_           = nullptr;
+    lv_obj_t *sw_rinex_         = nullptr;
+    lv_obj_t *lbl_rinex_file_   = nullptr;
+    lv_obj_t *lbl_fw_           = nullptr;
+    lv_obj_t *lbl_compile_      = nullptr;
 
-    // Position detail tab
-    lv_obj_t *lbl_d_lat_    = nullptr;
-    lv_obj_t *lbl_d_lon_    = nullptr;
-    lv_obj_t *lbl_d_alt_    = nullptr;
-    lv_obj_t *lbl_d_survey_ = nullptr;
-    lv_obj_t *bar_d_survey_ = nullptr;
+    // ── Debug tab ─────────────────────────────────────────────────────────────
+    lv_obj_t *lbl_debug_        = nullptr;
 
-    // System tab
-    lv_obj_t *lbl_ip_    = nullptr;
-    lv_obj_t *lbl_wifi_  = nullptr;
-    lv_obj_t *lbl_sd_    = nullptr;
-    lv_obj_t *lbl_rinex_ = nullptr;
-    lv_obj_t *lbl_fw_    = nullptr;
+    // ── WiFi config modal ─────────────────────────────────────────────────────
+    lv_obj_t *modal_wifi_       = nullptr;
+    lv_obj_t *ta_wifi_ssid_     = nullptr;
+    lv_obj_t *ta_wifi_pass_     = nullptr;
+    lv_obj_t *kb_wifi_          = nullptr;
+    lv_obj_t *list_wifi_scan_   = nullptr;
+    lv_obj_t *lbl_wifi_msg_     = nullptr;
+    lv_obj_t *btn_wifi_scan_    = nullptr;
+    std::atomic<bool> scan_running_{false};
 
+    // ── NTRIP config modal (shared, repopulated per service) ──────────────────
+    lv_obj_t *modal_ntrip_      = nullptr;
+    lv_obj_t *lbl_ntrip_title_  = nullptr;
+    lv_obj_t *sw_ntrip_en_      = nullptr;
+    lv_obj_t *ta_ntrip_mp_      = nullptr;
+    lv_obj_t *ta_ntrip_pw_      = nullptr;
+    lv_obj_t *kb_ntrip_         = nullptr;
+    int       ntrip_cfg_idx_    = 0;
+
+    // ── File browser modal ────────────────────────────────────────────────────
+    lv_obj_t *modal_files_      = nullptr;
+    lv_obj_t *lbl_fb_path_      = nullptr;
+    lv_obj_t *list_fb_          = nullptr;
+    std::string fb_path_;
+    std::vector<std::string> fb_entries_;
+
+    // ── Build helpers ─────────────────────────────────────────────────────────
     void build_screens(lv_display_t *disp);
     void build_status_tab(lv_obj_t *parent);
     void build_ntrip_tab(lv_obj_t *parent);
     void build_position_tab(lv_obj_t *parent);
     void build_system_tab(lv_obj_t *parent);
+    void build_debug_tab(lv_obj_t *parent);
+    void build_wifi_modal();
+    void build_ntrip_modal();
+    void build_file_browser();
 
+    // ── Modal show/populate ───────────────────────────────────────────────────
+    void open_wifi_modal();
+    void open_ntrip_modal(int idx);
+    void open_file_browser(const std::string &path);
+    void refresh_file_browser();
+    void populate_wifi_scan_list(const std::vector<WifiNetwork> &nets);
+    void save_ntrip_config();
+
+    // ── Periodic refresh ──────────────────────────────────────────────────────
     static void refresh_timer_cb(lv_timer_t *timer);
     void refresh();
+    void refresh_debug_log();
 
-    // Helpers
+    // ── Static helpers ────────────────────────────────────────────────────────
     static lv_obj_t *make_group(lv_obj_t *parent, const char *title);
     static lv_obj_t *make_row(lv_obj_t *parent, lv_obj_t **val_out,
                                const char *key);
+    static lv_obj_t *make_switch_row(lv_obj_t *parent, lv_obj_t **sw_out,
+                                      const char *key);
+    static lv_obj_t *make_modal_base(lv_obj_t *parent, const char *title);
     static void fmt_ntrip_label(lv_obj_t *lbl, const NtripStatus &ns,
                                  char *buf, size_t buf_len);
+    static void fmt_bytes_str(char *buf, size_t n, uint64_t bytes);
+    static void on_ta_focused(lv_event_t *e);
+    static void on_ta_defocused(lv_event_t *e);
+    static void on_kb_ready(lv_event_t *e);
+
+    // ── Static event callbacks (public so free helper functions can use them) ──
+public:
+    static void on_ntrip_cfg_btn(lv_event_t *e);
+private:
+    // ── WiFi modal callbacks ──────────────────────────────────────────────────
+    static void on_wifi_btn(lv_event_t *e);
+    static void on_wifi_close(lv_event_t *e);
+    static void on_wifi_scan(lv_event_t *e);
+    static void on_wifi_connect(lv_event_t *e);
+    static void on_wifi_list_click(lv_event_t *e);
+    static void wifi_scan_task(void *arg);
+
+    // ── NTRIP modal callbacks ─────────────────────────────────────────────────
+    static void on_ntrip_close(lv_event_t *e);
+    static void on_ntrip_save(lv_event_t *e);
+
+    // ── File browser callbacks ────────────────────────────────────────────────
+    static void on_files_btn(lv_event_t *e);
+    static void on_fb_close(lv_event_t *e);
+    static void on_fb_item(lv_event_t *e);
+    static void on_fb_up(lv_event_t *e);
+
+    // ── RINEX toggle callback ─────────────────────────────────────────────────
+    static void on_rinex_toggle(lv_event_t *e);
 };

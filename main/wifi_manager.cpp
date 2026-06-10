@@ -322,6 +322,22 @@ esp_err_t WifiManager::enable_access_point() {
     return ESP_OK;
 }
 
+esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "STA mode");
+    set_wifi_mac_from_efuse(WIFI_IF_STA);
+    ESP_RETURN_ON_ERROR(configure_station(credentials), kTag, "Configure STA");
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    access_point_active_ = false;
+    connected_ = false;
+    disconnected_at_ms_ = 0;
+    last_retry_ms_ = 0;
+    request_connect();
+    return ESP_OK;
+}
+
 void WifiManager::request_connect() {
     esp_err_t result = esp_wifi_connect();
     if (result != ESP_OK && result != ESP_ERR_WIFI_CONN) {
