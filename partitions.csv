@@ -1,9 +1,9 @@
 # ESP32-P4 with 32MB flash
-# Expanded app partitions (1.5MB each) to accommodate P4 firmware size.
+# App partitions expanded to 6MB each (4x original 1.5MB).
+# SPIFFS removed — all file storage is on the SD card.
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
-app0,     app,  ota_0,   0x10000, 0x180000,
-app1,     app,  ota_1,   0x190000,0x180000,
-spiffs,   data, spiffs,  0x310000,0x160000,
-coredump, data, coredump,0x470000,0x10000,
+app0,     app,  ota_0,   0x10000, 0x600000,
+app1,     app,  ota_1,   0x610000,0x600000,
+coredump, data, coredump,0xc10000,0x10000,
