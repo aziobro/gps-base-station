@@ -49,6 +49,10 @@ private:
     static constexpr uint32_t kInitialConnectTimeoutMs = 8000;
     static constexpr uint32_t kAccessPointDelayMs = 8000;
     static constexpr uint32_t kRetryIntervalMs = 10000;
+    // While in AP fallback, how often to drop AP and probe the saved network,
+    // and how long to wait for that probe to associate before restoring AP.
+    static constexpr uint32_t kApProbeIntervalMs = 60000;
+    static constexpr uint32_t kProbeConnectTimeoutMs = 8000;
     static constexpr char kAccessPointSsid[] = "GPS-BaseStation";
 
     Storage *storage_ = nullptr;
@@ -75,5 +79,6 @@ private:
 
     esp_err_t configure_station(const WifiCredentials &credentials);
     esp_err_t enable_access_point();
+    void probe_station_from_ap();
     void request_connect();
 };

@@ -253,25 +253,28 @@ void WifiManager::recovery_loop() {
     while (!stopping_) {
         const int64_t now = now_ms();
         if (!connected_) {
-            int64_t disconnected = disconnected_at_ms_;
-            if (disconnected == 0) {
-                disconnected_at_ms_ = now;
-                disconnected = now;
-            }
+            if (disconnected_at_ms_ == 0) disconnected_at_ms_ = now;
+            const int64_t disconnected = disconnected_at_ms_;
+            const bool have_creds = storage_ && storage_->load_wifi().valid;
 
-            if (!access_point_active_ &&
-                now - disconnected >= kAccessPointDelayMs) {
-                ESP_LOGW(kTag, "Connection unavailable; enabling AP fallback");
-                ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
-            }
-
-            // Only retry the station while still in STA mode. Once we have
-            // fallen back to the dedicated AP, esp_wifi_connect() is invalid.
-            if (!access_point_active_ && storage_ && storage_->load_wifi().valid &&
-                now - last_retry_ms_ >= kRetryIntervalMs) {
-                ESP_LOGI(kTag, "Retrying saved WiFi credentials");
-                last_retry_ms_ = now;
-                request_connect();
+            if (!access_point_active_) {
+                // Still in STA mode: keep retrying the saved network, and after
+                // a short grace period fall back to AP so the device remains
+                // reachable for configuration.
+                if (have_creds && now - last_retry_ms_ >= kRetryIntervalMs) {
+                    ESP_LOGI(kTag, "Retrying saved WiFi credentials");
+                    last_retry_ms_ = now;
+                    request_connect();
+                }
+                if (now - disconnected >= kAccessPointDelayMs) {
+                    ESP_LOGW(kTag, "Connection unavailable; enabling AP fallback");
+                    ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
+                }
+            } else if (have_creds && now - last_retry_ms_ >= kApProbeIntervalMs) {
+                // In AP fallback. The ESP32-C6 hosted radio cannot beacon an AP
+                // and run a station simultaneously, so periodically drop the AP,
+                // try the saved network, and restore AP if it is still down.
+                probe_station_from_ap();
             }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -317,9 +320,51 @@ esp_err_t WifiManager::enable_access_point() {
     ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
 
     access_point_active_ = true;
-    last_retry_ms_ = now_ms() - kRetryIntervalMs;
+    // Seed the probe timer so the first reconnect attempt happens one full
+    // probe interval from now rather than immediately.
+    last_retry_ms_ = now_ms();
     ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", kAccessPointSsid);
     return ESP_OK;
+}
+
+// Called from the recovery task while in AP fallback. Tears down the SoftAP,
+// brings the interface up as a station, and waits briefly for the saved
+// network. On success the device stays in station mode (the IP event handler
+// sets connected_); on timeout the SoftAP is restored so the device is never
+// left unreachable.
+void WifiManager::probe_station_from_ap() {
+    const WifiCredentials credentials = storage_->load_wifi();
+    if (!credentials.valid) return;
+
+    last_retry_ms_ = now_ms();
+    ESP_LOGI(kTag, "AP fallback: probing for saved network \"%s\"",
+             credentials.ssid.c_str());
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
+        return;
+    }
+    set_wifi_mac_from_efuse(WIFI_IF_STA);
+    if (configure_station(credentials) != ESP_OK ||
+        esp_wifi_start() != ESP_OK) {
+        ESP_LOGW(kTag, "AP fallback: probe setup failed; restoring AP");
+        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
+        return;
+    }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    access_point_active_ = false;
+    request_connect();
+
+    EventBits_t bits = xEventGroupWaitBits(
+        events_, kConnectedBit, pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(kProbeConnectTimeoutMs));
+    if (bits & kConnectedBit) {
+        ESP_LOGI(kTag, "AP fallback: reconnected to saved network");
+    } else {
+        ESP_LOGW(kTag, "AP fallback: saved network still unavailable; restoring AP");
+        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
+    }
 }
 
 esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
