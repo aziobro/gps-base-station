@@ -14,6 +14,7 @@
 #include "esp_hosted.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -21,6 +22,27 @@
 namespace {
 
 constexpr char kTag[] = "ui";
+
+const char *reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic";
+        case ESP_RST_INT_WDT:   return "int watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep-sleep";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "unknown";
+    }
+}
+
+bool reset_is_crash(esp_reset_reason_t r) {
+    return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT ||
+           r == ESP_RST_TASK_WDT || r == ESP_RST_WDT || r == ESP_RST_BROWNOUT;
+}
 
 // Colour palette
 constexpr uint32_t kBgScreen  = 0x0d1b2a;
@@ -514,6 +536,10 @@ void Ui::build_position_tab(lv_obj_t *parent) {
 // ── System tab ────────────────────────────────────────────────────────────────
 
 void Ui::build_system_tab(lv_obj_t *parent) {
+    lv_obj_t *g_sys = make_group(parent, "SYSTEM");
+    make_row(g_sys, &lbl_uptime_, "Uptime");
+    make_row(g_sys, &lbl_reset_,  "Last reset");
+
     lv_obj_t *g_net = make_group(parent, "NETWORK");
     make_row(g_net, &lbl_wifi_state_, "Station");
     make_row(g_net, &lbl_ip_,         "Station IP");
@@ -1427,6 +1453,22 @@ void Ui::refresh() {
         lv_label_set_text(lbl_sv_detail_, sat_buf);
     } else {
         lv_label_set_text(lbl_sv_detail_, "No satellite data");
+    }
+
+    // ── System tab: SYSTEM ────────────────────────────────────────────────────
+    {
+        uint64_t up = (uint64_t)(esp_timer_get_time() / 1000000);
+        unsigned dd = up / 86400, hh = (up % 86400) / 3600;
+        unsigned mm = (up % 3600) / 60, ss = up % 60;
+        if (dd) snprintf(buf, sizeof(buf), "%ud %02u:%02u:%02u", dd, hh, mm, ss);
+        else    snprintf(buf, sizeof(buf), "%02u:%02u:%02u", hh, mm, ss);
+        lv_label_set_text(lbl_uptime_, buf);
+
+        const esp_reset_reason_t rr = esp_reset_reason();
+        lv_label_set_text(lbl_reset_, reset_reason_str(rr));
+        lv_obj_set_style_text_color(lbl_reset_,
+            reset_is_crash(rr) ? lv_palette_main(LV_PALETTE_RED)
+                               : lv_color_hex(kDimCol), 0);
     }
 
     // ── System tab: NETWORK ───────────────────────────────────────────────────

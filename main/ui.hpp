@@ -80,6 +80,8 @@ private:
     lv_obj_t *lbl_sv_detail_    = nullptr;
 
     // ── System tab ────────────────────────────────────────────────────────────
+    lv_obj_t *lbl_uptime_       = nullptr;
+    lv_obj_t *lbl_reset_        = nullptr;
     lv_obj_t *lbl_wifi_state_   = nullptr;  // Station: SSID + RSSI / status
     lv_obj_t *lbl_ip_           = nullptr;  // Station IP
     lv_obj_t *lbl_ap_name_      = nullptr;  // Hotspot SSID

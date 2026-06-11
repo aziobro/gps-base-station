@@ -123,6 +123,15 @@ esp_err_t Storage::set_ntrip_streams_enabled(bool enabled) {
     return commit();
 }
 
+bool Storage::rinex_collection_enabled(bool default_value) const {
+    return get_bool("rinex_on", default_value);
+}
+
+esp_err_t Storage::set_rinex_collection_enabled(bool enabled) {
+    ESP_RETURN_ON_ERROR(set_bool("rinex_on", enabled), kTag, "RINEX flag save failed");
+    return commit();
+}
+
 bool Storage::get_bool(const char *key, bool default_value) const {
     if (!open_) return default_value;
     uint8_t value = default_value ? 1 : 0;

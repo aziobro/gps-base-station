@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <unistd.h>
 #include <vector>
 
 #include "esp_log.h"
@@ -453,7 +454,12 @@ void RinexLogger::write_epoch(int gps_week, double tow,
         fprintf(file_, "\n");
     }
 
+    // Flush stdio AND fsync so the FAT directory entry (size + cluster chain)
+    // is committed to the card. Without the fsync a reboot loses the whole
+    // file — the data is in the stdio/VFS buffer but the directory entry is
+    // never updated, so the file reads back as 0 bytes / unrecognisable.
     fflush(file_);
+    fsync(fileno(file_));
     ++epochs_;
     last_obs_week_ = gps_week;
     last_obs_tow_  = tow;

@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
@@ -63,6 +64,33 @@ std::string human_bytes(uint64_t bytes) {
         snprintf(text, sizeof(text), "%llu B",
                  static_cast<unsigned long long>(bytes));
     }
+    return text;
+}
+
+const char *reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic/exception";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "other watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "unknown";
+    }
+}
+
+std::string uptime_str(uint64_t seconds) {
+    char text[40];
+    unsigned d = seconds / 86400;
+    unsigned h = (seconds % 86400) / 3600;
+    unsigned m = (seconds % 3600) / 60;
+    unsigned s = seconds % 60;
+    if (d) snprintf(text, sizeof(text), "%ud %02u:%02u:%02u", d, h, m, s);
+    else   snprintf(text, sizeof(text), "%02u:%02u:%02u", h, m, s);
     return text;
 }
 
@@ -352,6 +380,10 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         "<h2>Status</h2><table>"
         "<tr><td>Framework</td><td>ESP-IDF " + std::string(esp_get_idf_version()) + "</td></tr>"
         "<tr><td>Application</td><td>" + std::string(esp_app_get_description()->version) + "</td></tr>"
+        "<tr><td>Uptime</td><td id='st-uptime'>" +
+        uptime_str(esp_timer_get_time() / 1000000ULL) + "</td></tr>"
+        "<tr><td>Last reset</td><td id='st-reset'>" +
+        std::string(reset_reason_str(esp_reset_reason())) + "</td></tr>"
         "<tr><td>System health</td><td id='st-health'><span class='" +
         std::string(server->station_->healthy() ? "ok'>healthy" : "err'>unhealthy") +
         "</span></td></tr>"
@@ -442,6 +474,7 @@ let statusRequest=false;
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function bytes(v){return v>=1048576?(v/1048576).toFixed(1)+' MB':v>=1024?(v/1024).toFixed(1)+' KB':v+' B';}
 function set(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v;}
+function upt(s){s=s|0;var d=(s/86400)|0,h=((s%86400)/3600)|0,m=((s%3600)/60)|0,x=s%60,p=n=>String(n).padStart(2,'0');return(d?d+'d ':'')+p(h)+':'+p(m)+':'+p(x);}
 function svc(p){if(!p.enabled)return "<span class='warn'>disabled</span>";const c=p.connected?'ok':'err',m=p.connected?'connected':esc(p.message);return "<span class='"+c+"'>"+m+"</span> <span class='dim'>| "+bytes(p.bytes)+" sent | "+p.dropped+" dropped</span>";}
 async function refresh(){
  if(statusRequest)return;statusRequest=true;
@@ -449,6 +482,7 @@ async function refresh(){
   const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);
   const d=await r.json(),total=d.gps+d.glonass+d.galileo+d.beidou;
   set('st-health',"<span class='"+(d.healthy?'ok':'err')+"'>"+(d.healthy?'healthy':'unhealthy')+"</span>");
+  set('st-uptime',upt(d.uptime_sec));set('st-reset',esc(d.reset_reason));
   set('st-wifi',(d.wifi_connected?'connected':d.ap_active?'AP fallback':'disconnected')+(d.ssid?" <span class='dim'>| "+esc(d.ssid)+"</span>":""));
   set('st-ip',esc(d.ip||'192.168.4.1'));
   const rc=d.rssi>=-70?'ok':d.rssi>=-80?'warn':'err',rh=d.rssi>=-60?'excellent':d.rssi>=-70?'good':d.rssi>=-80?'fair':'weak';
@@ -735,6 +769,8 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         "{\"framework\":\"ESP-IDF " + json_escape(esp_get_idf_version()) +
         "\",\"version\":\"" + json_escape(esp_app_get_description()->version) +
         "\",\"healthy\":" + (server->station_->healthy() ? "true" : "false") +
+        ",\"uptime_sec\":" + std::to_string(esp_timer_get_time() / 1000000ULL) +
+        ",\"reset_reason\":\"" + json_escape(reset_reason_str(esp_reset_reason())) + "\"" +
         ",\"wifi_connected\":" + (server->wifi_->connected() ? "true" : "false") +
         ",\"ap_active\":" + (server->wifi_->access_point_active() ? "true" : "false") +
         ",\"ssid\":\"" + json_escape(server->wifi_->ssid()) +

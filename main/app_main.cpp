@@ -6,6 +6,7 @@
 #include "esp_ldo_regulator.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "sd_manager.hpp"
 #include "storage.hpp"
@@ -100,12 +101,31 @@ void validate_ota_task(void *argument) {
     vTaskDelete(nullptr);
 }
 
+const char *reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external";
+        case ESP_RST_SW:        return "software";
+        case ESP_RST_PANIC:     return "panic/exception";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "other watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "unknown";
+    }
+}
+
 void enable_rtk_task(void *argument) {
     vTaskDelay(pdMS_TO_TICKS(20000));
     auto *station = static_cast<BaseStation *>(argument);
     if (station) {
         // Honor the persisted global NTRIP on/off rather than forcing on.
         station->apply_persisted_streams();
+        // Resume RINEX collection if it was on before the last reboot (SD is
+        // mounted well before this 20 s window elapses).
+        station->resume_persisted_rinex();
         ESP_LOGI(kTag, "RTK services restored to persisted state after startup window");
     }
     vTaskDelete(nullptr);
@@ -115,6 +135,7 @@ void enable_rtk_task(void *argument) {
 
 extern "C" void app_main() {
     enable_io_rail();  // power VDDPST_5 / SD + display I/O before anything uses it
+    ESP_LOGW(kTag, "Boot — last reset reason: %s", reset_reason_str(esp_reset_reason()));
     ESP_ERROR_CHECK(init_nvs());
     static Storage storage;
     ESP_ERROR_CHECK(storage.open());

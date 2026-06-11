@@ -181,15 +181,28 @@ char *SdManager::list_dir(const char *path) const {
         char fp[320];
         snprintf(fp, sizeof(fp), "%s/%s", path, ent->d_name);
         fp[sizeof(fp) - 1] = '\0';
-        struct stat st = {};
-        stat(fp, &st);
-        bool is_dir = S_ISDIR(st.st_mode);
+
+        // Use the directory-entry type from readdir (reliable on FATFS);
+        // stat() here was misclassifying regular files. stat only for size.
+        bool is_dir;
+        long long fsize = 0;
+        if (ent->d_type == DT_DIR) {
+            is_dir = true;
+        } else if (ent->d_type == DT_REG) {
+            is_dir = false;
+            struct stat st = {};
+            if (stat(fp, &st) == 0) fsize = static_cast<long long>(st.st_size);
+        } else {  // DT_UNKNOWN — fall back to stat for both type and size
+            struct stat st = {};
+            is_dir = (stat(fp, &st) == 0) && S_ISDIR(st.st_mode);
+            if (!is_dir) fsize = static_cast<long long>(st.st_size);
+        }
 
         if (!first) ok = ok && buf_append_str(&buf, &len, &cap, ",");
         first = false;
 
         char num[32];
-        snprintf(num, sizeof(num), "%lld", static_cast<long long>(is_dir ? 0 : st.st_size));
+        snprintf(num, sizeof(num), "%lld", fsize);
         ok = ok &&
             buf_append_str(&buf, &len, &cap, "{\"name\":\"") &&
             buf_append_json_str(&buf, &len, &cap, ent->d_name) &&

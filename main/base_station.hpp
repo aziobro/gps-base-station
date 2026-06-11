@@ -43,6 +43,8 @@ public:
     esp_err_t request_survey();
     esp_err_t request_position(double lat, double lon, double height);
     esp_err_t request_raw_collection(bool enable);
+    // Re-arm RINEX collection on boot if it was enabled before the last reboot.
+    void resume_persisted_rinex();
     void reload_services();
     // Transient suspend (boot hold-off, OTA, shutdown) — not persisted.
     void set_streams_suspended(bool suspended);

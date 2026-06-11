@@ -55,6 +55,11 @@ public:
     bool ntrip_streams_enabled(bool default_value = true) const;
     esp_err_t set_ntrip_streams_enabled(bool enabled);
 
+    // RINEX raw-data collection on/off (survives power cycles). Defaults to off.
+    // When enabled, collection resumes automatically after a reboot.
+    bool rinex_collection_enabled(bool default_value = false) const;
+    esp_err_t set_rinex_collection_enabled(bool enabled);
+
 private:
     nvs_handle_t handle_ = 0;
     bool open_ = false;

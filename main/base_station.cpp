@@ -88,10 +88,21 @@ esp_err_t BaseStation::request_survey() {
 
 esp_err_t BaseStation::request_raw_collection(bool enable) {
     if (!actions_) return ESP_ERR_INVALID_STATE;
+    // Persist the user's intent so collection resumes after a reboot.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.set_rinex_collection_enabled(enable));
     const ActionType t = enable ? ActionType::kStartRaw : ActionType::kStopRaw;
     const Action action{t, 0, 0, 0};
     return xQueueSend(actions_, &action, 0) == pdTRUE
         ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+void BaseStation::resume_persisted_rinex() {
+    if (!actions_ || !storage_.rinex_collection_enabled()) return;
+    // Queue a start without re-persisting; enter_raw_collection() requires Base
+    // TX mode, which is the normal post-reboot state when a position is stored.
+    const Action action{ActionType::kStartRaw, 0, 0, 0};
+    xQueueSend(actions_, &action, 0);
+    ESP_LOGI(kTag, "Resuming persisted RINEX collection after reboot");
 }
 
 esp_err_t BaseStation::request_position(
