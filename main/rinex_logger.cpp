@@ -454,14 +454,30 @@ void RinexLogger::write_epoch(int gps_week, double tow,
         fprintf(file_, "\n");
     }
 
+    // Update tracking state so the header patch below uses the correct time.
+    last_obs_week_ = gps_week;
+    last_obs_tow_  = tow;
+
+    // Patch TIME OF LAST OBS in the header after every epoch so a reboot
+    // never leaves the placeholder showing the first-observation time. The
+    // pattern is: save the append position, seek back to the reserved header
+    // slot, overwrite in place (same fixed width), then seek forward again so
+    // the next epoch appends correctly.
+    if (last_obs_pos_ > 0) {
+        const long append_pos = ftell(file_);
+        if (fseek(file_, last_obs_pos_, SEEK_SET) == 0) {
+            fprintf(file_,
+                "%6d%6d%6d%6d%6d%13.7f     GPS         TIME OF LAST OBS\n",
+                Y, Mo, D, h, m, s);
+            fseek(file_, append_pos, SEEK_SET);
+        }
+    }
+
     // Flush stdio AND fsync so the FAT directory entry (size + cluster chain)
-    // is committed to the card. Without the fsync a reboot loses the whole
-    // file — the data is in the stdio/VFS buffer but the directory entry is
-    // never updated, so the file reads back as 0 bytes / unrecognisable.
+    // is committed to the card. Both the epoch data and the patched header
+    // slot are flushed together in one call.
     fflush(file_);
     fsync(fileno(file_));
     ++epochs_;
-    last_obs_week_ = gps_week;
-    last_obs_tow_  = tow;
     ESP_LOGI(kTag, "Epoch GPS %d %.1f — %d satellites", gps_week, tow, (int)epoch.size());
 }
