@@ -53,8 +53,6 @@ private:
     void write_header(int gps_week, double tow);
     void write_epoch(int gps_week, double tow, std::vector<SatObs> &sats);
 
-    static char sys_char(uint8_t sys);
-    static int  display_prn(uint8_t sys, uint16_t prn);
     static bool prefers_sig2(uint8_t sys, uint8_t sig);
 
     double ecef_x_ = 0, ecef_y_ = 0, ecef_z_ = 0;
@@ -67,6 +65,15 @@ private:
     double      tow_open_      = 0.0;
     int         epochs_        = 0;  // epochs in current file
     int         files_         = 0;
+
+    // Systems (bitmask over channel-status system ids) declared in this file's
+    // SYS / # / OBS TYPES header, fixed from the first epoch.
+    uint8_t     present_mask_  = 0;
+    // Byte offset of the TIME OF LAST OBS header line, patched on close once the
+    // final epoch time is known.
+    long        last_obs_pos_  = 0;
+    int         last_obs_week_ = 0;
+    double      last_obs_tow_  = 0.0;
 
     static constexpr size_t kMsgBufSize = 32 * 1024;
     char   msg_buf_[kMsgBufSize];

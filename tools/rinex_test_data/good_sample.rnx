@@ -1,0 +1,29 @@
+     3.03           OBSERVATION DATA    M                   RINEX VERSION / TYPE
+GPS_BASE            ESP32_RTK           20260611 143000 UTC PGM / RUN BY / DATE
+GPS_BASE_STATION                                            MARKER NAME
+GEODETIC                                                    MARKER TYPE
+UNKNOWN             UNKNOWN                                 OBSERVER / AGENCY
+0000                UM980               UNICORE             REC # / TYPE / VERS
+0000                UNKNOWN                                 ANT # / TYPE
+  1234567.0000 -4567890.0000  4012345.0000                  APPROX POSITION XYZ
+        0.0000        0.0000        0.0000                  ANTENNA: DELTA H/E/N
+G    8 C1C L1C D1C S1C C2W L2W D2W S2W                      SYS / # / OBS TYPES
+R    8 C1C L1C D1C S1C C2C L2C D2C S2C                      SYS / # / OBS TYPES
+E    8 C1C L1C D1C S1C C5Q L5Q D5Q S5Q                      SYS / # / OBS TYPES
+C    8 C2I L2I D2I S2I C6I L6I D6I S6I                      SYS / # / OBS TYPES
+    30.000                                                  INTERVAL
+  2026     6    10    14    30    0.0000000     GPS         TIME OF FIRST OBS
+  2026     6    10    14    30   30.0000000     GPS         TIME OF LAST OBS
+                                                            END OF HEADER
+> 2026  6 10 14 30  0.0000000  0  5
+G05  23456789.000  123456789.000      1234.000        45.000
+G12  23555555.000  123555555.000      1200.000        44.000
+R01  23611111.000  123611111.000      1150.000        43.000
+E07  23711111.000  123711111.000      1050.000        46.000
+C34  23811111.000  123811111.000       950.000        41.000
+> 2026  6 10 14 30 30.0000000  0  5
+G05  23456111.000  123456111.000      1230.000        45.000
+G12  23555222.000  123555222.000      1199.000        44.000
+R01  23611333.000  123611333.000      1149.000        43.000
+E07  23711444.000  123711444.000      1049.000        46.000
+C34  23811555.000  123811555.000       949.000        41.000

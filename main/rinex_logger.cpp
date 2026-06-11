@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "rinex_satid.h"
 #include "sd_manager.hpp"
 
 namespace {
@@ -126,24 +127,6 @@ void RinexLogger::feed(const uint8_t *data, size_t len) {
 
 // ---------------------------------------------------------------------------
 
-char RinexLogger::sys_char(uint8_t sys) {
-    switch (sys) {
-        case 0: return 'G';
-        case 1: return 'R';
-        case 3: return 'E';
-        case 4: return 'C';
-        case 5: return 'J';
-        default: return 0;  // skip unknown/SBAS
-    }
-}
-
-int RinexLogger::display_prn(uint8_t sys, uint16_t prn) {
-    if (sys == 1 && prn > 64)  return prn - 64;   // GLONASS offset
-    if (sys == 3 && prn > 200) return prn - 200;  // Galileo offset
-    if (sys == 4 && prn > 160) return prn - 160;  // BDS offset
-    return prn;
-}
-
 // Return true if this signal type is the preferred secondary (L2/E5a/B3I).
 bool RinexLogger::prefers_sig2(uint8_t sys, uint8_t sig) {
     switch (sys) {
@@ -208,6 +191,7 @@ void RinexLogger::process_message() {
     const int num_obs = atoi(tok);
     if (num_obs <= 0 || num_obs > 120) return;
 
+    int skipped = 0;  // observation records skipped as invalid/unsupported
     for (int i = 0; i < num_obs; ++i) {
         // Collect the 10 fields for this observation.
         char *f[10];
@@ -237,13 +221,21 @@ void RinexLogger::process_message() {
         const float   cn0      = (float)atof(f[7]);
         const uint32_t tstat   = (uint32_t)strtoul(f[9], nullptr, 16);
 
-        const uint8_t  sys      = (tstat >> 15) & 0x7;
-        const uint8_t  sig      = (tstat >> 18) & 0xF;
+        // Satellite system lives in bits 16-18 of the Novatel/UM980 channel
+        // tracking status; signal type in bits 21-25 (5 bits).
+        const uint8_t  sys      = (tstat >> 16) & 0x7;
+        const uint8_t  sig      = (tstat >> 21) & 0x1F;
         const bool     is_prim  = (tstat >> 23) & 0x1;
 
-        // Skip SBAS (2) and NavIC (6) — not supported in our header.
-        if (sys == 2 || sys == 6) continue;
-        if (sys_char(sys) == 0) continue;
+        // Validate the constellation + PRN before storing. Anything that can't
+        // map to a legal RINEX id (unsupported system, GPS>32, GLONASS>24, ...)
+        // is dropped and counted so it never reaches the file as a fake G##.
+        char sat_id[4];
+        if (!rinex::format_sat_id(sys, prn, sat_id)) {
+            ++skipped;
+            ESP_LOGD(kTag, "skip sat: sys=%u prn=%u (no valid RINEX id)", sys, prn);
+            continue;
+        }
 
         // Find or create the entry for this satellite.
         SatObs *sat = nullptr;
@@ -275,11 +267,22 @@ void RinexLogger::process_message() {
         }
     }
 
+    if (skipped > 0) {
+        ESP_LOGW(kTag, "epoch GPS %d %.0f: skipped %d invalid/unsupported sat records",
+                 gps_week, rounded, skipped);
+    }
     if (sats.empty()) return;
 
     rotate_if_needed(gps_week, rounded);
 
-    if (!file_) open_file(gps_week, rounded);
+    if (!file_) {
+        // Fix the file's declared systems from the first epoch's valid sats.
+        present_mask_ = 0;
+        for (const auto &s : sats) {
+            if (rinex::find_system(s.system)) present_mask_ |= (1u << s.system);
+        }
+        open_file(gps_week, rounded);
+    }
     if (file_)  write_epoch(gps_week, rounded, sats);
 }
 
@@ -302,7 +305,8 @@ void RinexLogger::open_file(int gps_week, double tow) {
              "%s/rawdata/BASE_%04d%02d%02d_%02d%02d%02d.rnx",
              SdManager::kMountPoint, Y, Mo, D, h, m, (int)s);
 
-    file_ = fopen(fname, "w");
+    // "w+" so close_file() can seek back and patch TIME OF LAST OBS.
+    file_ = fopen(fname, "w+");
     if (!file_) {
         ESP_LOGE(kTag, "Cannot open %s", fname);
         return;
@@ -311,6 +315,9 @@ void RinexLogger::open_file(int gps_week, double tow) {
     gps_week_open_ = gps_week;
     tow_open_      = tow;
     epochs_        = 0;
+    last_obs_pos_  = 0;
+    last_obs_week_ = gps_week;
+    last_obs_tow_  = tow;
 
     write_header(gps_week, tow);
     ESP_LOGI(kTag, "Opened RINEX file: %s", fname);
@@ -318,6 +325,23 @@ void RinexLogger::open_file(int gps_week, double tow) {
 
 void RinexLogger::close_file() {
     if (!file_) return;
+
+    // Patch the TIME OF LAST OBS placeholder with the final epoch's time. The
+    // replacement line is byte-for-byte the same width as the placeholder, so
+    // it overwrites in place without shifting the epoch data that follows.
+    if (last_obs_pos_ > 0) {
+        int Y, Mo, D, h, m;
+        double s;
+        gps_to_calendar(last_obs_week_, last_obs_tow_, Y, Mo, D, h, m, s);
+        fflush(file_);
+        if (fseek(file_, last_obs_pos_, SEEK_SET) == 0) {
+            fprintf(file_,
+                "%6d%6d%6d%6d%6d%13.7f     GPS         TIME OF LAST OBS\n",
+                Y, Mo, D, h, m, s);
+            fflush(file_);
+        }
+    }
+
     fclose(file_);
     file_ = nullptr;
     ++files_;
@@ -355,22 +379,31 @@ void RinexLogger::write_header(int gps_week, double tow) {
     fprintf(file_, "%14.4f%14.4f%14.4f                  ANTENNA: DELTA H/E/N\n",
             0.0, 0.0, 0.0);
 
-    // SYS / # / OBS TYPES — 8 obs per system: C L D S for two frequency bands.
-    // GPS: L1C/A (sig1) + L2P (sig2)
-    // GLO: L1C/A (sig1) + L2C/A (sig2)
-    // GAL: E1C  (sig1) + E5a  (sig2)
-    // BDS: B1I  (sig1) + B3I  (sig2)
-    fprintf(file_,
-        "G    8 C1C L1C D1C S1C C2W L2W D2W S2W                      SYS / # / OBS TYPES\n");
-    fprintf(file_,
-        "R    8 C1C L1C D1C S1C C2C L2C D2C S2C                      SYS / # / OBS TYPES\n");
-    fprintf(file_,
-        "E    8 C1C L1C D1C S1C C5Q L5Q D5Q S5Q                      SYS / # / OBS TYPES\n");
-    fprintf(file_,
-        "C    8 C2I L2I D2I S2I C6I L6I D6I S6I                      SYS / # / OBS TYPES\n");
+    // SYS / # / OBS TYPES — emit a line only for systems actually present in
+    // this file (determined from the first epoch). 8 obs per system: C L D S
+    // for two frequency bands.  ("%c    8 %s" puts the system letter in col 1,
+    // the obs count in cols 4-6, and the codes from col 8 per RINEX 3.)
+    int nsys = 0;
+    const rinex::SystemDef *defs = rinex::systems(&nsys);
+    for (int i = 0; i < nsys; ++i) {
+        if (!(present_mask_ & (1u << defs[i].sys))) continue;
+        char content[64];
+        snprintf(content, sizeof(content), "%c    8 %s", defs[i].code, defs[i].obs);
+        fprintf(file_, "%-60sSYS / # / OBS TYPES\n", content);
+    }
+
+    // Observation cadence.
+    fprintf(file_, "%10.3f%50sINTERVAL\n", (double)kEpochInterval, "");
 
     // Format (5I6, F13.7, 5X, A3) = 51 cols, then 9 blanks = 60; label at col 61.
     fprintf(file_, "%6d%6d%6d%6d%6d%13.7f     GPS         TIME OF FIRST OBS\n",
+            Y, Mo, D, h, m, s);
+
+    // TIME OF LAST OBS: written now as a placeholder (= first-obs time, so the
+    // header is valid even if never patched) and overwritten in close_file()
+    // once the final epoch is known. Record its byte offset for that patch.
+    last_obs_pos_ = ftell(file_);
+    fprintf(file_, "%6d%6d%6d%6d%6d%13.7f     GPS         TIME OF LAST OBS\n",
             Y, Mo, D, h, m, s);
 
     fprintf(file_, "%-60sEND OF HEADER    \n", "");
@@ -384,10 +417,18 @@ void RinexLogger::write_epoch(int gps_week, double tow,
     double s;
     gps_to_calendar(gps_week, tow, Y, Mo, D, h, m, s);
 
-    // Filter to only the four systems declared in the header.
-    std::vector<SatObs *> epoch;
+    // Build the exact set of satellites that will be written: only systems
+    // declared in this file's header, and only PRNs that map to a valid RINEX
+    // id. Caching the id keeps the epoch-header count equal to the number of
+    // observation rows that follow (task: count must match).
+    struct EpochSat { const SatObs *sat; char id[4]; };
+    std::vector<EpochSat> epoch;
+    epoch.reserve(sats.size());
     for (auto &sat : sats) {
-        if (sys_char(sat.system) != 0) epoch.push_back(&sat);
+        if (!(present_mask_ & (1u << sat.system))) continue;
+        char id[4];
+        if (!rinex::format_sat_id(sat.system, sat.prn, id)) continue;
+        epoch.push_back({&sat, {id[0], id[1], id[2], id[3]}});
     }
     if (epoch.empty()) return;
 
@@ -395,11 +436,10 @@ void RinexLogger::write_epoch(int gps_week, double tow,
     fprintf(file_, "> %4d%3d%3d%3d%3d%11.7f  0%3d\n",
             Y, Mo, D, h, m, s, (int)epoch.size());
 
-    for (const SatObs *sat : epoch) {
-        // Satellite identifier: sys_char + 2-digit PRN
-        fprintf(file_, "%c%02d",
-                sys_char(sat->system),
-                display_prn(sat->system, sat->prn));
+    for (const EpochSat &es : epoch) {
+        const SatObs *sat = es.sat;
+        // Satellite identifier with its correct constellation prefix + PRN.
+        fprintf(file_, "%s", es.id);
 
         // 8 observation values in declared order: C1, L1, D1, S1, C2, L2, D2, S2
         write_obs(file_, sat->sig1.valid, sat->sig1.pseudorange);
@@ -415,5 +455,7 @@ void RinexLogger::write_epoch(int gps_week, double tow,
 
     fflush(file_);
     ++epochs_;
+    last_obs_week_ = gps_week;
+    last_obs_tow_  = tow;
     ESP_LOGI(kTag, "Epoch GPS %d %.1f — %d satellites", gps_week, tow, (int)epoch.size());
 }
