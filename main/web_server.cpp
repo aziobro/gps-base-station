@@ -219,6 +219,7 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/files/rename", HTTP_POST, files_rename_handler, this},
         {"/files/mkdir", HTTP_POST, files_mkdir_handler, this},
         {"/rinex/toggle", HTTP_POST, rinex_toggle_handler, this},
+        {"/ntrip/toggle", HTTP_POST, ntrip_toggle_handler, this},
         {"/files/rinex_merge", HTTP_GET, files_rinex_merge_handler, this},
     };
     for (const auto &handler : handlers) {
@@ -380,6 +381,15 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         " total</span></td></tr>"
         "<tr><td>Local NTRIP clients</td><td id='st-clients'>" +
         std::to_string(station.local_clients) + "</td></tr>"
+        "<tr><td>NTRIP push</td><td id='st-ntrip'>" +
+        [&]() {
+            const bool en = server->station_->streams_enabled();
+            return std::string("<span class='") + (en ? "ok'>enabled" : "warn'>disabled") +
+                "</span> &nbsp; <button onclick=\"toggleNtrip(" +
+                (en ? "false" : "true") + ")\">" + (en ? "Disable" : "Enable") +
+                "</button>";
+        }() +
+        "</td></tr>"
         "<tr><td>RTK2go</td><td id='st-r2g'>" +
         service_html(station.rtk2go) + "</td></tr>"
         "<tr><td>Onocoy</td><td id='st-onc'>" +
@@ -452,6 +462,7 @@ async function refresh(){
   set('st-sats','GPS '+d.gps+' / GLO '+d.glonass+' / GAL '+d.galileo+' / BDS '+d.beidou+" <span class='dim'>| total "+total+"</span>");
   set('st-rtcm',d.rtcm_bps+" B/s <span class='dim'>| "+bytes(d.rtcm_total)+" total</span>");
   set('st-clients',d.local_clients);set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
+  set('st-ntrip',(d.ntrip_enabled?"<span class='ok'>enabled</span>":"<span class='warn'>disabled</span>")+" &nbsp; <button onclick=\"toggleNtrip("+(d.ntrip_enabled?'false':'true')+")\">"+(d.ntrip_enabled?'Disable':'Enable')+"</button>");
   const hp=Math.round(d.free_heap*100/d.heap_total),hc=hp>=40?'ok':hp>=20?'warn':'err';
   set('st-heap',"<span class='"+hc+"'>"+bytes(d.free_heap)+" ("+hp+"% free)</span> <span class='dim'>| low watermark "+bytes(d.min_free_heap)+"</span>");
   if(!d.sd_mounted){set('st-sd',"<span class='err'>not mounted</span>");}
@@ -463,6 +474,10 @@ async function refresh(){
 }
 async function toggleRinex(start){
  try{await fetch('/rinex/toggle',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'start='+(start?'1':'0')});}catch(e){}
+ setTimeout(refresh,500);
+}
+async function toggleNtrip(on){
+ try{await fetch('/ntrip/toggle',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'on='+(on?'1':'0')});}catch(e){}
  setTimeout(refresh,500);
 }
 setTimeout(refresh,15000);
@@ -741,6 +756,8 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"beidou\":" + std::to_string(station.survey.beidou) +
         std::string(survey_json) +
         ",\"local_clients\":" + std::to_string(station.local_clients) +
+        ",\"ntrip_enabled\":" +
+        (server->station_->streams_enabled() ? "true" : "false") +
         ",\"rtk2go\":" + provider_json(station.rtk2go) +
         ",\"onocoy\":" + provider_json(station.onocoy) +
         ",\"rtkdata\":" + provider_json(station.rtkdata) +
@@ -1393,6 +1410,18 @@ esp_err_t AdminWebServer::rinex_toggle_handler(httpd_req_t *request) {
     if (err != ESP_OK) {
         return httpd_resp_sendstr(request, "{\"ok\":false}");
     }
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
+}
+
+esp_err_t AdminWebServer::ntrip_toggle_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const std::string body = read_body(request, 64);
+    const std::string on   = form_value(body, "on");
+    const bool enable = (on == "1" || on == "true");
+    server->station_->set_streams_enabled(enable);  // persists across power cycles
+    httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 

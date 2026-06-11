@@ -92,22 +92,10 @@ esp_err_t WifiManager::start(Storage &storage) {
         ESP_LOGW(kTag, "No saved WiFi credentials; starting access point");
         ESP_RETURN_ON_ERROR(enable_access_point(), kTag, "AP start failed");
     } else {
+        // Run AP + station together so the GPS-BaseStation SoftAP stays
+        // reachable for configuration whether or not the saved network is up.
         ESP_RETURN_ON_ERROR(
-            configure_station(credentials), kTag, "Station config failed");
-        ESP_RETURN_ON_ERROR(
-            esp_wifi_set_mode(WIFI_MODE_STA), kTag, "Station mode failed");
-        set_wifi_mac_from_efuse(WIFI_IF_STA);
-        ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
-        request_connect();
-
-        EventBits_t bits = xEventGroupWaitBits(
-            events_, kConnectedBit, pdFALSE, pdFALSE,
-            pdMS_TO_TICKS(kInitialConnectTimeoutMs));
-        if ((bits & kConnectedBit) == 0) {
-            ESP_LOGW(kTag, "Initial connection timed out; enabling AP fallback");
-            ESP_RETURN_ON_ERROR(enable_access_point(), kTag, "AP fallback failed");
-        }
+            enable_ap_sta(credentials), kTag, "AP+STA start failed");
     }
 
     if (xTaskCreate(
@@ -153,6 +141,19 @@ std::string WifiManager::ip_address() const {
     if (!connected_ || !station_netif_) return {};
     esp_netif_ip_info_t info{};
     if (esp_netif_get_ip_info(station_netif_, &info) != ESP_OK) return {};
+    char address[16]{};
+    snprintf(address, sizeof(address), IPSTR, IP2STR(&info.ip));
+    return address;
+}
+
+std::string WifiManager::access_point_ssid() const {
+    return access_point_active_ ? std::string(kAccessPointSsid) : std::string();
+}
+
+std::string WifiManager::access_point_ip() const {
+    if (!access_point_active_ || !access_point_netif_) return {};
+    esp_netif_ip_info_t info{};
+    if (esp_netif_get_ip_info(access_point_netif_, &info) != ESP_OK) return {};
     char address[16]{};
     snprintf(address, sizeof(address), IPSTR, IP2STR(&info.ip));
     return address;
@@ -211,12 +212,7 @@ void WifiManager::handle_event(esp_event_base_t event_base, int32_t event_id,
         disconnected_at_ms_ = 0;
         xEventGroupSetBits(events_, kConnectedBit);
         ESP_LOGI(kTag, "Station connected: " IPSTR, IP2STR(&event->ip_info.ip));
-        if (access_point_active_) {
-            if (esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK) {
-                access_point_active_ = false;
-                ESP_LOGI(kTag, "AP fallback disabled after station recovery");
-            }
-        }
+        // In AP+STA mode the SoftAP stays up deliberately; do not tear it down.
         return;
     }
 
@@ -252,30 +248,13 @@ void WifiManager::recovery_task_entry(void *arg) {
 void WifiManager::recovery_loop() {
     while (!stopping_) {
         const int64_t now = now_ms();
-        if (!connected_) {
-            if (disconnected_at_ms_ == 0) disconnected_at_ms_ = now;
-            const int64_t disconnected = disconnected_at_ms_;
-            const bool have_creds = storage_ && storage_->load_wifi().valid;
-
-            if (!access_point_active_) {
-                // Still in STA mode: keep retrying the saved network, and after
-                // a short grace period fall back to AP so the device remains
-                // reachable for configuration.
-                if (have_creds && now - last_retry_ms_ >= kRetryIntervalMs) {
-                    ESP_LOGI(kTag, "Retrying saved WiFi credentials");
-                    last_retry_ms_ = now;
-                    request_connect();
-                }
-                if (now - disconnected >= kAccessPointDelayMs) {
-                    ESP_LOGW(kTag, "Connection unavailable; enabling AP fallback");
-                    ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
-                }
-            } else if (have_creds && now - last_retry_ms_ >= kApProbeIntervalMs) {
-                // In AP fallback. The ESP32-C6 hosted radio cannot beacon an AP
-                // and run a station simultaneously, so periodically drop the AP,
-                // try the saved network, and restore AP if it is still down.
-                probe_station_from_ap();
-            }
+        // In AP+STA the SoftAP is always beaconing; we only need to keep nudging
+        // the station to (re)associate with the saved network while it is down.
+        const bool have_creds = storage_ && storage_->load_wifi().valid;
+        if (have_creds && !connected_ && now - last_retry_ms_ >= kRetryIntervalMs) {
+            ESP_LOGI(kTag, "Retrying station association");
+            last_retry_ms_ = now;
+            request_connect();
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -303,9 +282,8 @@ esp_err_t WifiManager::enable_access_point() {
     config.ap.max_connection = 4;
     config.ap.authmode = WIFI_AUTH_OPEN;
 
-    // The ESP32-C6 hosted radio only beacons a SoftAP in pure AP mode; APSTA
-    // reports "started" but never goes on the air. Stop any running STA mode
-    // first, then bring the interface up as a dedicated access point.
+    // Pure AP — used only when no station credentials are stored. Stop any
+    // running mode first, then bring the interface up as a dedicated AP.
     wifi_mode_t mode = WIFI_MODE_NULL;
     ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
     if (mode != WIFI_MODE_NULL) {
@@ -320,67 +298,59 @@ esp_err_t WifiManager::enable_access_point() {
     ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
 
     access_point_active_ = true;
-    // Seed the probe timer so the first reconnect attempt happens one full
-    // probe interval from now rather than immediately.
+    connected_ = false;
     last_retry_ms_ = now_ms();
     ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", kAccessPointSsid);
     return ESP_OK;
 }
 
-// Called from the recovery task while in AP fallback. Tears down the SoftAP,
-// brings the interface up as a station, and waits briefly for the saved
-// network. On success the device stays in station mode (the IP event handler
-// sets connected_); on timeout the SoftAP is restored so the device is never
-// left unreachable.
-void WifiManager::probe_station_from_ap() {
-    const WifiCredentials credentials = storage_->load_wifi();
-    if (!credentials.valid) return;
-
-    last_retry_ms_ = now_ms();
-    ESP_LOGI(kTag, "AP fallback: probing for saved network \"%s\"",
-             credentials.ssid.c_str());
-
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
-    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
-        return;
+// Bring the radio up in AP+STA: the SoftAP beacons continuously while the
+// station associates with the saved network. (Historically the ESP32-C6
+// hosted radio would not beacon in APSTA — this path re-tests that now that
+// the SDIO link is stable.)
+esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
+    if (mode != WIFI_MODE_NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
     }
+
+    ESP_RETURN_ON_ERROR(
+        esp_wifi_set_mode(WIFI_MODE_APSTA), kTag, "APSTA mode failed");
+
+    wifi_config_t ap_config{};
+    strlcpy(reinterpret_cast<char *>(ap_config.ap.ssid),
+            kAccessPointSsid, sizeof(ap_config.ap.ssid));
+    ap_config.ap.ssid_len = strlen(kAccessPointSsid);
+    ap_config.ap.channel = 1;
+    ap_config.ap.max_connection = 4;
+    ap_config.ap.authmode = WIFI_AUTH_OPEN;
+
+    ESP_RETURN_ON_ERROR(
+        esp_wifi_set_config(WIFI_IF_AP, &ap_config), kTag, "AP config failed");
+    ESP_RETURN_ON_ERROR(
+        configure_station(credentials), kTag, "Station config failed");
+    set_wifi_mac_from_efuse(WIFI_IF_AP);
     set_wifi_mac_from_efuse(WIFI_IF_STA);
-    if (configure_station(credentials) != ESP_OK ||
-        esp_wifi_start() != ESP_OK) {
-        ESP_LOGW(kTag, "AP fallback: probe setup failed; restoring AP");
-        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
-        return;
-    }
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
-    access_point_active_ = false;
-    request_connect();
 
-    EventBits_t bits = xEventGroupWaitBits(
-        events_, kConnectedBit, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(kProbeConnectTimeoutMs));
-    if (bits & kConnectedBit) {
-        ESP_LOGI(kTag, "AP fallback: reconnected to saved network");
-    } else {
-        ESP_LOGW(kTag, "AP fallback: saved network still unavailable; restoring AP");
-        ESP_ERROR_CHECK_WITHOUT_ABORT(enable_access_point());
-    }
-}
-
-esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "STA mode");
-    set_wifi_mac_from_efuse(WIFI_IF_STA);
-    ESP_RETURN_ON_ERROR(configure_station(credentials), kTag, "Configure STA");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start");
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
-    access_point_active_ = false;
+
+    access_point_active_ = true;
     connected_ = false;
     disconnected_at_ms_ = 0;
     last_retry_ms_ = 0;
     request_connect();
+    ESP_LOGI(kTag, "AP+STA active: AP %s + station \"%s\"",
+             kAccessPointSsid, credentials.ssid.c_str());
     return ESP_OK;
+}
+
+esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
+    esp_wifi_disconnect();
+    // Bring the radio back up in AP+STA so the SoftAP stays reachable while the
+    // newly entered network is attempted.
+    return enable_ap_sta(credentials);
 }
 
 void WifiManager::request_connect() {

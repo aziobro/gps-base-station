@@ -51,6 +51,10 @@ public:
     WifiCredentials load_wifi() const;
     esp_err_t save_wifi(const WifiCredentials &credentials);
 
+    // Global NTRIP push on/off (survives power cycles). Defaults to enabled.
+    bool ntrip_streams_enabled(bool default_value = true) const;
+    esp_err_t set_ntrip_streams_enabled(bool enabled);
+
 private:
     nvs_handle_t handle_ = 0;
     bool open_ = false;

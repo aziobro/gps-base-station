@@ -123,6 +123,17 @@ void BaseStation::set_streams_suspended(bool suspended) {
     apply_stream_state();
 }
 
+void BaseStation::set_streams_enabled(bool enabled) {
+    ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.set_ntrip_streams_enabled(enabled));
+    external_suspend_ = !enabled;
+    apply_stream_state();
+}
+
+void BaseStation::apply_persisted_streams() {
+    external_suspend_ = !storage_.ntrip_streams_enabled(true);
+    apply_stream_state();
+}
+
 bool BaseStation::healthy() const {
     const int64_t heartbeat = heartbeat_us_;
     return heartbeat > 0 && esp_timer_get_time() - heartbeat < 2000000;

@@ -85,8 +85,9 @@ void enable_rtk_task(void *argument) {
     vTaskDelay(pdMS_TO_TICKS(20000));
     auto *station = static_cast<BaseStation *>(argument);
     if (station) {
-        station->set_streams_suspended(false);
-        ESP_LOGI(kTag, "RTK services enabled after web startup window");
+        // Honor the persisted global NTRIP on/off rather than forcing on.
+        station->apply_persisted_streams();
+        ESP_LOGI(kTag, "RTK services restored to persisted state after startup window");
     }
     vTaskDelete(nullptr);
 }

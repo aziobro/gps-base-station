@@ -12,6 +12,9 @@ CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
 CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
 CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
 CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=40000
+# Deeper host->slave TX queue so packets ride out a busy C6 (longer SDIO write
+# retry window) instead of being dropped at enqueue.
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=32
 # Move SDIO DMA buffers to PSRAM — ESP32-P4 GDMA can reach PSRAM via cache.
 # Without this, ~47KB of DMA-capable internal SRAM is consumed before the main
 # task can be created, leaving insufficient space for the 10KB main task stack.

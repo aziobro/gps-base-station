@@ -41,18 +41,14 @@ public:
     int rssi() const;
     std::string ssid() const;
     std::string ip_address() const;
+    std::string access_point_ssid() const;  // SoftAP name, "" when AP is down
+    std::string access_point_ip() const;     // SoftAP gateway IP, "" when down
     std::vector<WifiNetwork> scan_networks();
     esp_err_t update_credentials(const WifiCredentials &credentials);
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;
-    static constexpr uint32_t kInitialConnectTimeoutMs = 8000;
-    static constexpr uint32_t kAccessPointDelayMs = 8000;
-    static constexpr uint32_t kRetryIntervalMs = 10000;
-    // While in AP fallback, how often to drop AP and probe the saved network,
-    // and how long to wait for that probe to associate before restoring AP.
-    static constexpr uint32_t kApProbeIntervalMs = 60000;
-    static constexpr uint32_t kProbeConnectTimeoutMs = 8000;
+    static constexpr uint32_t kRetryIntervalMs = 10000;  // station re-association retry
     static constexpr char kAccessPointSsid[] = "GPS-BaseStation";
 
     Storage *storage_ = nullptr;
@@ -79,6 +75,8 @@ private:
 
     esp_err_t configure_station(const WifiCredentials &credentials);
     esp_err_t enable_access_point();
-    void probe_station_from_ap();
+    // Bring the radio up in AP+STA so the SoftAP stays reachable while the
+    // station (re)associates with the saved network.
+    esp_err_t enable_ap_sta(const WifiCredentials &credentials);
     void request_connect();
 };

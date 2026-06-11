@@ -515,8 +515,10 @@ void Ui::build_position_tab(lv_obj_t *parent) {
 
 void Ui::build_system_tab(lv_obj_t *parent) {
     lv_obj_t *g_net = make_group(parent, "NETWORK");
-    make_row(g_net, &lbl_ip_,         "IP address");
-    make_row(g_net, &lbl_wifi_state_, "WiFi");
+    make_row(g_net, &lbl_wifi_state_, "Station");
+    make_row(g_net, &lbl_ip_,         "Station IP");
+    make_row(g_net, &lbl_ap_name_,    "Hotspot");
+    make_row(g_net, &lbl_ap_ip_,      "Hotspot IP");
 
     lv_obj_t *wifi_btn = lv_button_create(g_net);
     lv_obj_set_size(wifi_btn, LV_PCT(100), 40);
@@ -541,7 +543,7 @@ void Ui::build_system_tab(lv_obj_t *parent) {
     lv_obj_add_event_cb(files_btn, on_files_btn, LV_EVENT_CLICKED, this);
 
     lv_obj_t *g_fw = make_group(parent, "FIRMWARE");
-    make_row(g_fw, &lbl_fw_,         "Version");
+    make_row(g_fw, &lbl_fw_,         "Firmware");
     make_row(g_fw, &lbl_compile_,    "Built");
     make_row(g_fw, &lbl_c6_running_, "C6 running");
     make_row(g_fw, &lbl_c6_fw_,      "C6 available");
@@ -1083,7 +1085,7 @@ void Ui::on_ntrip_all_toggle(lv_event_t *e) {
     auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
     lv_obj_t *sw = lv_event_get_target_obj(e);
     bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    ui->station_->set_streams_suspended(!enabled);
+    ui->station_->set_streams_enabled(enabled);  // persists across power cycles
 }
 
 void Ui::on_survey_start(lv_event_t *e) {
@@ -1427,27 +1429,37 @@ void Ui::refresh() {
         lv_label_set_text(lbl_sv_detail_, "No satellite data");
     }
 
-    // ── System tab ────────────────────────────────────────────────────────────
-    const std::string ip = wifi_->ip_address();
-    lv_label_set_text(lbl_ip_,
-        ip.empty() ? (wifi_->access_point_active() ? "AP: 192.168.4.1" : "—") :
-                     ip.c_str());
-
+    // ── System tab: NETWORK ───────────────────────────────────────────────────
+    // Station row: connected network + signal, or the link state while down.
     if (wifi_->connected()) {
         snprintf(buf, sizeof(buf), "%s  %d dBm",
                  wifi_->ssid().c_str(), wifi_->rssi());
         lv_obj_set_style_text_color(lbl_wifi_state_,
             lv_palette_main(LV_PALETTE_GREEN), 0);
-    } else if (wifi_->access_point_active()) {
-        snprintf(buf, sizeof(buf), "AP mode (GPS-BaseStation)");
-        lv_obj_set_style_text_color(lbl_wifi_state_,
-            lv_palette_main(LV_PALETTE_YELLOW), 0);
     } else {
-        snprintf(buf, sizeof(buf), "Disconnected");
-        lv_obj_set_style_text_color(lbl_wifi_state_,
-            lv_palette_main(LV_PALETTE_RED), 0);
+        const WifiCredentials wc = storage_->load_wifi();
+        if (wc.valid) {
+            snprintf(buf, sizeof(buf), "Connecting to %s\xe2\x80\xa6",
+                     wc.ssid.c_str());
+            lv_obj_set_style_text_color(lbl_wifi_state_,
+                lv_palette_main(LV_PALETTE_YELLOW), 0);
+        } else {
+            snprintf(buf, sizeof(buf), "Not configured");
+            lv_obj_set_style_text_color(lbl_wifi_state_, lv_color_hex(kDimCol), 0);
+        }
     }
     lv_label_set_text(lbl_wifi_state_, buf);
+
+    const std::string sta_ip = wifi_->ip_address();
+    lv_label_set_text(lbl_ip_, sta_ip.empty() ? "\xe2\x80\x94" : sta_ip.c_str());
+
+    // Hotspot row: SoftAP name + IP (always up in AP+STA).
+    const std::string ap_name = wifi_->access_point_ssid();
+    const std::string ap_ip   = wifi_->access_point_ip();
+    lv_label_set_text(lbl_ap_name_, ap_name.empty() ? "off" : ap_name.c_str());
+    lv_obj_set_style_text_color(lbl_ap_name_,
+        ap_name.empty() ? lv_color_hex(kDimCol) : lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_label_set_text(lbl_ap_ip_, ap_ip.empty() ? "\xe2\x80\x94" : ap_ip.c_str());
 
     if (sd_->is_mounted()) {
         const SdManager::DiskStats stats = sd_->disk_stats();

@@ -44,8 +44,14 @@ public:
     esp_err_t request_position(double lat, double lon, double height);
     esp_err_t request_raw_collection(bool enable);
     void reload_services();
+    // Transient suspend (boot hold-off, OTA, shutdown) — not persisted.
     void set_streams_suspended(bool suspended);
+    // User-facing global NTRIP toggle — persisted to NVS and applied.
+    void set_streams_enabled(bool enabled);
+    // Apply the persisted NTRIP on/off state (called after the boot hold-off).
+    void apply_persisted_streams();
     bool streams_suspended() const { return external_suspend_; }
+    bool streams_enabled() const { return !external_suspend_; }
     bool healthy() const;
 
     BaseStationStatus status() const;

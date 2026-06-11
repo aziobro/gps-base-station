@@ -80,8 +80,10 @@ private:
     lv_obj_t *lbl_sv_detail_    = nullptr;
 
     // ── System tab ────────────────────────────────────────────────────────────
-    lv_obj_t *lbl_ip_           = nullptr;
-    lv_obj_t *lbl_wifi_state_   = nullptr;
+    lv_obj_t *lbl_wifi_state_   = nullptr;  // Station: SSID + RSSI / status
+    lv_obj_t *lbl_ip_           = nullptr;  // Station IP
+    lv_obj_t *lbl_ap_name_      = nullptr;  // Hotspot SSID
+    lv_obj_t *lbl_ap_ip_        = nullptr;  // Hotspot IP
     lv_obj_t *lbl_sd_           = nullptr;
     lv_obj_t *sw_rinex_         = nullptr;
     lv_obj_t *lbl_rinex_file_   = nullptr;

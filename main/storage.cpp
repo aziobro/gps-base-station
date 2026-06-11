@@ -114,6 +114,15 @@ esp_err_t Storage::save_wifi(const WifiCredentials &credentials) {
     return commit();
 }
 
+bool Storage::ntrip_streams_enabled(bool default_value) const {
+    return get_bool("ntrip_on", default_value);
+}
+
+esp_err_t Storage::set_ntrip_streams_enabled(bool enabled) {
+    ESP_RETURN_ON_ERROR(set_bool("ntrip_on", enabled), kTag, "NTRIP flag save failed");
+    return commit();
+}
+
 bool Storage::get_bool(const char *key, bool default_value) const {
     if (!open_) return default_value;
     uint8_t value = default_value ? 1 : 0;
