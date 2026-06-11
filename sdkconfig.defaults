@@ -40,6 +40,14 @@ CONFIG_LV_OS_FREERTOS=y
 CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_LWIP_MAX_SOCKETS=32
+# Larger TCP window so the high-RTT SoftAP path (single-radio APSTA time-shares
+# with the station, AP clients power-save between beacons) isn't throttled by a
+# tiny window. Default 5760 (4xMSS) starves AP throughput; 11520 = 8xMSS.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+# Selective ACK: recover individual segments lost on the SDIO link without a
+# full timeout-based retransmit stall.
+CONFIG_LWIP_TCP_SACK_OUT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y

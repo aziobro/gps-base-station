@@ -281,6 +281,7 @@ esp_err_t WifiManager::enable_access_point() {
     config.ap.channel = 1;
     config.ap.max_connection = 4;
     config.ap.authmode = WIFI_AUTH_OPEN;
+    config.ap.dtim_period = 1;  // wake PS clients every beacon — lower latency
 
     // Pure AP — used only when no station credentials are stored. Stop any
     // running mode first, then bring the interface up as a dedicated AP.
@@ -325,6 +326,7 @@ esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
     ap_config.ap.channel = 1;
     ap_config.ap.max_connection = 4;
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    ap_config.ap.dtim_period = 1;  // wake PS clients every beacon — lower latency
 
     ESP_RETURN_ON_ERROR(
         esp_wifi_set_config(WIFI_IF_AP, &ap_config), kTag, "AP config failed");
