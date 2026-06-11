@@ -95,24 +95,10 @@ i2c_master_bus_handle_t bsp_i2c_get_handle(void)
 
 static esp_err_t bsp_enable_ldo_vo4(void)
 {
-    static esp_ldo_channel_handle_t vo4_chan = NULL;
-    if (vo4_chan != NULL) {
-        return ESP_OK;
-    }
-    esp_ldo_channel_config_t ldo_cfg = {
-        .chan_id = 4,
-        .voltage_mv = 3300,
-    };
-
-    esp_err_t err = esp_ldo_acquire_channel(&ldo_cfg, &vo4_chan);
-    if (err != ESP_OK) {
-        /* Channel may be fixed-voltage or already acquired by another driver (e.g. SDIO).
-         * Treat as non-fatal — the rail is assumed to be at 3.3 V already. */
-        ESP_LOGW(TAG, "LDO VO4 acquire failed (err=0x%x), assuming 3.3 V already supplied", err);
-        return ESP_OK;
-    }
-    ESP_LOGI(TAG, "LDO VO4 set to 3300mV");
-
+    /* LDO channel 4 (VDDPST_5 / 3.3 V I/O rail, shared with the microSD supply)
+     * is acquired once by the application at startup so there is a single owner.
+     * Acquiring it here too just collided with that owner and logged an error,
+     * so this is intentionally a no-op. */
     return ESP_OK;
 }
 
@@ -638,8 +624,9 @@ lv_display_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
     assert(cfg != NULL);
     BSP_ERROR_CHECK_RETURN_NULL(lvgl_port_init(&cfg->lvgl_port_cfg));
 
-    BSP_ERROR_CHECK_RETURN_NULL(bsp_display_brightness_init());
-
+    // Backlight LEDC is initialised inside bsp_display_lcd_init() ->
+    // bsp_display_new_with_handles(); calling it here too double-reserves the
+    // backlight GPIO and logs a spurious "GPIO not usable" warning.
     BSP_NULL_CHECK(disp = bsp_display_lcd_init(cfg), NULL);
 
     // Touch init failure is non-fatal: the display still works without touch.

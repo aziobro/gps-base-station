@@ -1,7 +1,6 @@
 #pragma once
 
 #include "esp_err.h"
-#include "sd_pwr_ctrl.h"
 #include "sdmmc_cmd.h"
 
 // Manages the microSD card on the Waveshare ESP32-P4-WIFI6 board via SPI.
@@ -41,7 +40,6 @@ public:
 
 private:
     sdmmc_card_t *card_ = nullptr;
-    sd_pwr_ctrl_handle_t ldo_handle_ = nullptr;
     bool mounted_ = false;
     bool spi_bus_initialized_ = false;
 };

@@ -13,7 +13,6 @@
 #include "driver/spi_common.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
-#include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
 
 namespace {
@@ -75,17 +74,12 @@ SdManager::~SdManager() {
 esp_err_t SdManager::mount() {
     if (mounted_) return ESP_OK;
 
-    // The Waveshare ESP32-P4-WIFI6 connects VDDPST_5 and the microSD supply
-    // to ESP_LDO_VO4. Without enabling channel 4 the bus pins toggle but the
-    // card stays unpowered and ACMD41 times out.
-    sd_pwr_ctrl_ldo_config_t ldo_cfg = { .ldo_chan_id = 4 };
-    esp_err_t ret = sd_pwr_ctrl_new_on_chip_ldo(&ldo_cfg, &ldo_handle_);
-    if (ret != ESP_OK) {
-        ESP_LOGE(kTag, "SD LDO init failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    // The microSD supply (VDDPST_5 / LDO VO4) is acquired once by the
+    // application at startup (see app_main), so there is a single owner of that
+    // channel; the SDSPI host does not manage card power here.
 
     // Initialise the SPI bus that the SD card sits on.
+    esp_err_t ret = ESP_OK;
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = kMosiPin,
         .miso_io_num = kMisoPin,
@@ -105,14 +99,11 @@ esp_err_t SdManager::mount() {
     ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "SPI bus init failed: %s", esp_err_to_name(ret));
-        sd_pwr_ctrl_del_on_chip_ldo(ldo_handle_);
-        ldo_handle_ = nullptr;
         return ret;
     }
     spi_bus_initialized_ = true;
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.pwr_ctrl_handle = ldo_handle_;
 
     sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_cfg.gpio_cs = kCsPin;
@@ -131,8 +122,6 @@ esp_err_t SdManager::mount() {
         ESP_LOGW(kTag, "SD card unavailable: %s", esp_err_to_name(ret));
         spi_bus_free(SPI2_HOST);
         spi_bus_initialized_ = false;
-        sd_pwr_ctrl_del_on_chip_ldo(ldo_handle_);
-        ldo_handle_ = nullptr;
         return ret;
     }
 
@@ -150,10 +139,6 @@ void SdManager::unmount() {
     if (spi_bus_initialized_) {
         spi_bus_free(SPI2_HOST);
         spi_bus_initialized_ = false;
-    }
-    if (ldo_handle_) {
-        sd_pwr_ctrl_del_on_chip_ldo(ldo_handle_);
-        ldo_handle_ = nullptr;
     }
     ESP_LOGI(kTag, "SD card unmounted");
 }

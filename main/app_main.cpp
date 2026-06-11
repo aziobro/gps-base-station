@@ -3,6 +3,7 @@
 #include "base_station.hpp"
 #include "display.hpp"
 #include "esp_check.h"
+#include "esp_ldo_regulator.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "nvs_flash.h"
@@ -29,6 +30,24 @@ constexpr gpio_num_t kCommandTx = GPIO_NUM_3;   // UM980 COM2 RX2 <- P3 pin 7
 constexpr uart_port_t kDataUart = UART_NUM_2;
 constexpr gpio_num_t kDataRx = GPIO_NUM_21;  // UM980 COM3 TX3
 constexpr gpio_num_t kDataTx = GPIO_NUM_22;  // UM980 COM3 RX3
+
+// Power the shared 3.3 V I/O rail (LDO channel 4 / VDDPST_5) that feeds the
+// microSD card and the display I/O. Acquired exactly once here so there is a
+// single owner — the SD driver and the display BSP both rely on it already
+// being up rather than acquiring it themselves (which previously collided and
+// logged "can't acquire the channel"). Held for the lifetime of the program.
+void enable_io_rail() {
+    static esp_ldo_channel_handle_t vo4 = nullptr;
+    if (vo4) return;
+    esp_ldo_channel_config_t cfg = { .chan_id = 4, .voltage_mv = 3300, .flags = {} };
+    esp_err_t err = esp_ldo_acquire_channel(&cfg, &vo4);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "LDO VO4 acquire failed: %s (assuming already supplied)",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(kTag, "LDO VO4 (3.3 V I/O rail) enabled");
+    }
+}
 
 esp_err_t init_nvs() {
     esp_err_t err = nvs_flash_init();
@@ -95,6 +114,7 @@ void enable_rtk_task(void *argument) {
 }  // namespace
 
 extern "C" void app_main() {
+    enable_io_rail();  // power VDDPST_5 / SD + display I/O before anything uses it
     ESP_ERROR_CHECK(init_nvs());
     static Storage storage;
     ESP_ERROR_CHECK(storage.open());
