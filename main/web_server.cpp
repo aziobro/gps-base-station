@@ -1345,15 +1345,21 @@ function mergeSelected(){
   btn.textContent='Merging…';
   statusEl.style.display='';
   statusEl.style.color='#888';
-  statusEl.textContent='Merging '+cbs.length+' file'+(cbs.length===1?'':'s')+'… do not navigate away.';
+  var t0=Date.now(),rx=0;
+  var timer=setInterval(function(){
+    var s=Math.round((Date.now()-t0)/1000);
+    statusEl.textContent=rx>0
+      ?'Downloading… '+(rx/1024).toFixed(0)+' KB — '+s+'s elapsed — do not navigate away.'
+      :'Merging '+cbs.length+' file'+(cbs.length===1?'':'s')+'… '+s+'s elapsed — do not navigate away.';
+  },1000);
   var xhr=new XMLHttpRequest();
   xhr.open('POST','/files/rinex_merge');
   xhr.setRequestHeader('Content-Type','application/json');
   xhr.responseType='blob';
-  xhr.onprogress=function(e){
-    statusEl.textContent='Downloading… '+(e.loaded/1024).toFixed(0)+' KB received — do not navigate away.';
-  };
+  xhr.timeout=600000;
+  xhr.onprogress=function(e){rx=e.loaded;};
   xhr.onload=function(){
+    clearInterval(timer);
     if(xhr.status===200){
       var blob=xhr.response;
       var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='merged.rnx';a.click();URL.revokeObjectURL(a.href);
@@ -1365,7 +1371,14 @@ function mergeSelected(){
     }
     btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
   };
+  xhr.ontimeout=function(){
+    clearInterval(timer);
+    statusEl.style.color='#f44';
+    statusEl.textContent='✗ Merge timed out — try fewer files.';
+    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
+  };
   xhr.onerror=function(){
+    clearInterval(timer);
     statusEl.style.color='#f44';
     statusEl.textContent='✗ Merge failed — check connection.';
     btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
