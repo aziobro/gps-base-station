@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -45,11 +46,13 @@ public:
     std::string access_point_ip() const;     // SoftAP gateway IP, "" when down
     std::vector<WifiNetwork> scan_networks();
     esp_err_t update_credentials(const WifiCredentials &credentials);
+    // Re-reads the AP password from storage and applies it to the running
+    // SoftAP without a reboot. Call after saving a new AP password.
+    esp_err_t apply_ap_settings();
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;
     static constexpr uint32_t kRetryIntervalMs = 10000;  // station re-association retry
-    static constexpr char kAccessPointSsid[] = "GPS-BaseStation";
 
     Storage *storage_ = nullptr;
     EventGroupHandle_t events_ = nullptr;
@@ -74,6 +77,10 @@ private:
     void recovery_loop();
 
     esp_err_t configure_station(const WifiCredentials &credentials);
+    // Fills the SoftAP half of a wifi_config_t from the shared SSID constant
+    // and the AP password stored in NVS (falling back to the documented
+    // default when none is set or it is too short for WPA2).
+    void fill_ap_config(wifi_config_t &config) const;
     esp_err_t enable_access_point();
     // Bring the radio up in AP+STA so the SoftAP stays reachable while the
     // station (re)associates with the saved network.

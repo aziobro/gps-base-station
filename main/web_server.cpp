@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <vector>
 
+#include "app_config.hpp"
 #include "base_station.hpp"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -19,6 +20,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "log_buffer.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -113,11 +115,24 @@ std::string service_html(const NtripStatus &status) {
     if (!status.enabled) return "<span class='warn'>disabled</span>";
     const char *css = status.connected ? "ok" : "err";
     const std::string label =
-        status.connected ? "connected" : escape_html(status.message);
-    return "<span class='" + std::string(css) + "'>" + label + "</span>"
+        status.connected
+            ? "connected <span class='dim'>(" + uptime_str(status.connected_sec) + ")</span>"
+            : escape_html(status.message);
+    std::string out = "<span class='" + std::string(css) + "'>" + label + "</span>"
            " <span class='dim'>| " + human_bytes(status.bytes_sent) +
-           " sent | " + std::to_string(status.dropped_batches) +
-           " dropped</span>";
+           " sent | " + std::to_string(status.dropped_batches) + " dropped";
+    if (status.reconnects) {
+        out += " | " + std::to_string(status.reconnects) + " reconnects";
+    }
+    if (status.ever_sent) {
+        out += " | last data " + std::to_string(status.last_send_age_sec) + "s ago";
+    }
+    out += "</span>";
+    if (!status.connected && !status.last_error.empty()) {
+        out += " <span class='err' style='font-size:0.85em'>" +
+               escape_html(status.last_error) + "</span>";
+    }
+    return out;
 }
 
 std::string rssi_html(int rssi) {
@@ -162,7 +177,7 @@ esp_err_t AdminWebServer::start(
     sd_ = &sd;
 
     httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
-    tls_config.httpd.max_uri_handlers = 25;
+    tls_config.httpd.max_uri_handlers = 32;
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 30;
     tls_config.httpd.send_wait_timeout = 30;
@@ -240,6 +255,9 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/config/position", HTTP_POST, position_handler, this},
         {"/survey", HTTP_POST, survey_handler, this},
         {"/config/wifi", HTTP_POST, wifi_handler, this},
+        {"/config/ap", HTTP_POST, ap_password_handler, this},
+        {"/logs", HTTP_GET, logs_page_handler, this},
+        {"/logs/data", HTTP_GET, logs_data_handler, this},
         {"/ca.crt", HTTP_GET, ca_certificate_handler, this},
         {"/files", HTTP_GET, files_page_handler, this},
         {"/files/list", HTTP_GET, files_list_handler, this},
@@ -468,6 +486,7 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         "</table><p><a href='/config'>Configuration</a> &nbsp; "
         "<a href='/skyplot'>Sky plot</a> &nbsp; "
         "<a href='/files'>SD card files</a> &nbsp; "
+        "<a href='/logs'>Console logs</a> &nbsp; "
         "<a href='/status'>JSON status</a> &nbsp; "
         "<a href='/update'>Firmware update</a></p>"
         R"HTML(<script>
@@ -476,7 +495,7 @@ function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function bytes(v){return v>=1048576?(v/1048576).toFixed(1)+' MB':v>=1024?(v/1024).toFixed(1)+' KB':v+' B';}
 function set(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v;}
 function upt(s){s=s|0;var d=(s/86400)|0,h=((s%86400)/3600)|0,m=((s%3600)/60)|0,x=s%60,p=n=>String(n).padStart(2,'0');return(d?d+'d ':'')+p(h)+':'+p(m)+':'+p(x);}
-function svc(p){if(!p.enabled)return "<span class='warn'>disabled</span>";const c=p.connected?'ok':'err',m=p.connected?'connected':esc(p.message);return "<span class='"+c+"'>"+m+"</span> <span class='dim'>| "+bytes(p.bytes)+" sent | "+p.dropped+" dropped</span>";}
+function svc(p){if(!p.enabled)return "<span class='warn'>disabled</span>";const c=p.connected?'ok':'err',m=p.connected?("connected <span class='dim'>("+upt(p.connected_sec)+")</span>"):esc(p.message);var d="<span class='"+c+"'>"+m+"</span> <span class='dim'>| "+bytes(p.bytes)+" sent | "+p.dropped+" dropped";if(p.reconnects)d+=" | "+p.reconnects+" reconnects";if(p.ever_sent)d+=" | last data "+p.last_send_age+"s ago";d+="</span>";if(!p.connected&&p.last_error)d+=" <span class='err' style='font-size:0.85em'>"+esc(p.last_error)+"</span>";return d;}
 async function refresh(){
  if(statusRequest)return;statusRequest=true;
  try{
@@ -625,7 +644,14 @@ esp_err_t AdminWebServer::config_get_handler(httpd_req_t *request) {
         "p.append(b,document.createTextNode(` ${n.rssi} dBm ${n.secured?'secured':'open'}`));"
         "o.appendChild(p)});};"
         "</script>"
-        "<p><a href='/'>Back</a></p>";
+        "<h2>Access Point (Hotspot)</h2>"
+        "<form method='post' action='/config/ap'>"
+        "<p class='dim'>SSID: <b>" + html_escape(config::kAccessPointSsid) +
+        "</b> (WPA2). Set the password used to join the device's own hotspot.</p>"
+        "<p><input name='ap_pw' type='password' minlength='8' maxlength='63' "
+        "placeholder='New hotspot password (8-63 chars)' required></p>"
+        "<button>Save Hotspot Password</button></form>"
+        "<p><a href='/logs'>Console logs</a> &nbsp; <a href='/'>Back</a></p>";
     return server->send_page(request, "Configuration", content);
 }
 
@@ -750,7 +776,12 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
             ",\"connected\":" + (status.connected ? "true" : "false") +
             ",\"message\":\"" + json_escape(status.message) +
             "\",\"bytes\":" + std::to_string(status.bytes_sent) +
-            ",\"dropped\":" + std::to_string(status.dropped_batches) + "}";
+            ",\"dropped\":" + std::to_string(status.dropped_batches) +
+            ",\"reconnects\":" + std::to_string(status.reconnects) +
+            ",\"last_error\":\"" + json_escape(status.last_error) +
+            "\",\"connected_sec\":" + std::to_string(status.connected_sec) +
+            ",\"ever_sent\":" + (status.ever_sent ? "true" : "false") +
+            ",\"last_send_age\":" + std::to_string(status.last_send_age_sec) + "}";
     };
     const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     const SurveySnapshot &sv = station.survey;
@@ -1019,6 +1050,73 @@ esp_err_t AdminWebServer::wifi_handler(httpd_req_t *request) {
     httpd_resp_sendstr(request, "WiFi credentials saved. Restarting.");
     xTaskCreate(restart_task, "wifi_restart", 2048, nullptr, 3, nullptr);
     return ESP_OK;
+}
+
+esp_err_t AdminWebServer::ap_password_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+    const std::string body = read_body(request, 256);
+    const std::string password = form_value(body, "ap_pw");
+    if (password.size() < 8 || password.size() > 63) {
+        return httpd_resp_send_err(
+            request, HTTPD_400_BAD_REQUEST,
+            "Hotspot password must be 8-63 characters");
+    }
+    ESP_RETURN_ON_ERROR(
+        server->storage_->save_ap_password(password), kTag, "AP password save failed");
+    // Apply live so the change takes effect without a reboot. Currently joined
+    // hotspot clients will be dropped and must reconnect with the new password.
+    server->wifi_->apply_ap_settings();
+    httpd_resp_set_status(request, "303 See Other");
+    httpd_resp_set_hdr(request, "Location", "/config");
+    return httpd_resp_send(request, nullptr, 0);
+}
+
+esp_err_t AdminWebServer::logs_page_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+    const std::string content = R"HTML(
+<h2>Console Logs</h2>
+<p class='dim'>Live ESP-IDF console output (most recent ~16 KB). Useful for
+diagnosing NTRIP, WiFi, and SD errors without a serial cable.</p>
+<p>
+ <label><input type='checkbox' id='auto' checked style='width:auto'> Auto-refresh (3s)</label>
+ &nbsp; <button type='button' id='refresh'>Refresh now</button>
+ &nbsp; <button type='button' id='bottom'>Jump to end</button>
+</p>
+<pre id='log' style='background:#080b08;color:#cde;padding:10px;border-radius:6px;
+ max-height:70vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
+ font:12px/1.4 monospace'>loading…</pre>
+<p><a href='/config'>Configuration</a> &nbsp; <a href='/'>Back</a></p>
+<script>
+const pre=document.getElementById('log'),auto=document.getElementById('auto');
+let busy=false;
+async function load(){
+ if(busy)return;busy=true;
+ try{
+  const r=await fetch('/logs/data',{cache:'no-store'});
+  if(r.ok){
+   const atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
+   pre.textContent=await r.text();
+   if(atEnd)pre.scrollTop=pre.scrollHeight;
+  }
+ }catch(e){}finally{busy=false;}
+}
+document.getElementById('refresh').onclick=load;
+document.getElementById('bottom').onclick=()=>{pre.scrollTop=pre.scrollHeight;};
+load().then(()=>{pre.scrollTop=pre.scrollHeight;});
+setInterval(()=>{if(auto.checked)load();},3000);
+</script>)HTML";
+    return server->send_page(request, "Console Logs", content);
+}
+
+esp_err_t AdminWebServer::logs_data_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+    const std::string logs = log_buffer::snapshot();
+    httpd_resp_set_type(request, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, logs.c_str(), logs.size());
 }
 
 bool AdminWebServer::authorize(httpd_req_t *request) const {

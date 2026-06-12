@@ -4,6 +4,7 @@ idf_component_register(
         "base_station.cpp"
         "display.cpp"
         "local_caster.cpp"
+        "log_buffer.cpp"
         "ntrip_push.cpp"
         "rinex_logger.cpp"
         "sd_manager.cpp"

@@ -9,7 +9,19 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPORT="$SCRIPT_DIR/.tools/esp-idf-v6.0.1/export.sh"
 IDF_PY="$SCRIPT_DIR/.tools/esp-idf-v6.0.1/tools/idf.py"
-RISCV_BIN="/Users/andrewziobrop/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin"
+
+# Load machine-specific config (git-ignored). A real environment variable set
+# by the caller takes precedence, so capture those before sourcing config.env
+# and re-apply them afterwards. See config.sample.env for documentation.
+_PORT_OVERRIDE="${PORT:-}"
+_RISCV_OVERRIDE="${RISCV_TOOLCHAIN_BIN:-}"
+[ -f "$SCRIPT_DIR/config.env" ] && source "$SCRIPT_DIR/config.env"
+[ -n "$_PORT_OVERRIDE" ] && PORT="$_PORT_OVERRIDE"
+[ -n "$_RISCV_OVERRIDE" ] && RISCV_TOOLCHAIN_BIN="$_RISCV_OVERRIDE"
+
+# Built-in fallbacks keep the repo working even without a config.env.
+RISCV_BIN="${RISCV_TOOLCHAIN_BIN:-$HOME/.espressif/tools/riscv32-esp-elf/esp-15.2.0_20251204/riscv32-esp-elf/bin}"
+PORT="${PORT:-/dev/tty.usbmodem5B140747221}"
 
 if [ ! -f "$EXPORT" ]; then
     echo "ERROR: export.sh not found at $EXPORT"
@@ -20,9 +32,6 @@ source "$EXPORT"
 
 # Ensure the RISC-V toolchain is on PATH (needed when running as a subshell)
 export PATH="$RISCV_BIN:$PATH"
-
-# Default port for ESP32-P4-WIFI6-Touch-LCD-4B
-PORT="${PORT:-/dev/tty.usbmodem5B140747221}"
 
 # If arguments were passed, run idf.py with them
 if [ $# -gt 0 ]; then

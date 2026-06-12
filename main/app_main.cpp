@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "log_buffer.hpp"
 #include "nvs_flash.h"
 #include "sd_manager.hpp"
 #include "storage.hpp"
@@ -134,6 +135,7 @@ void enable_rtk_task(void *argument) {
 }  // namespace
 
 extern "C" void app_main() {
+    log_buffer::init();  // capture console output for the /logs web page
     enable_io_rail();  // power VDDPST_5 / SD + display I/O before anything uses it
     ESP_LOGW(kTag, "Boot — last reset reason: %s", reset_reason_str(esp_reset_reason()));
     ESP_ERROR_CHECK(init_nvs());

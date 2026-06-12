@@ -114,6 +114,16 @@ esp_err_t Storage::save_wifi(const WifiCredentials &credentials) {
     return commit();
 }
 
+std::string Storage::ap_password() const {
+    return get_string("ap_pw");
+}
+
+esp_err_t Storage::save_ap_password(const std::string &password) {
+    ESP_RETURN_ON_ERROR(
+        set_string("ap_pw", password), kTag, "AP password save failed");
+    return commit();
+}
+
 bool Storage::ntrip_streams_enabled(bool default_value) const {
     return get_bool("ntrip_on", default_value);
 }

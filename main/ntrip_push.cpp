@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lwip/tcp.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
@@ -80,21 +81,39 @@ void NtripPushClient::push(const uint8_t *data, size_t length) {
     Packet packet{};
     packet.length = std::min(length, kMaxPacket);
     memcpy(packet.data, data, packet.length);
-    if (xQueueSend(queue_, &packet, 0) != pdTRUE) {
-        ++dropped_batches_;
-        reconnect_ = true;
-    }
+    if (xQueueSend(queue_, &packet, 0) == pdTRUE) return;
+    // Queue full: the sender is briefly behind (e.g. a stalled TCP window).
+    // Drop the OLDEST batch and keep the freshest one rather than forcing a
+    // reconnect — RTCM corrections are superseded every second, and tearing
+    // down the caster connection over a transient backlog triggers
+    // reconnect storms that casters (RTK2go, Onocoy) rate-limit and ban.
+    Packet stale{};
+    xQueueReceive(queue_, &stale, 0);
+    ++dropped_batches_;
+    xQueueSend(queue_, &packet, 0);
 }
 
 NtripStatus NtripPushClient::status() const {
     std::lock_guard lock(config_mutex_);
-    return {
-        enabled_,
-        connected_,
-        message_,
-        bytes_sent_,
-        dropped_batches_,
-    };
+    const int64_t now = esp_timer_get_time();
+    const int64_t connected_since = connected_since_us_.load();
+    const int64_t last_send = last_send_us_.load();
+    NtripStatus status;
+    status.enabled = enabled_;
+    status.connected = connected_;
+    status.message = message_;
+    status.bytes_sent = bytes_sent_;
+    status.dropped_batches = dropped_batches_;
+    status.reconnects = reconnects_;
+    status.last_error = last_error_;
+    status.connected_sec =
+        (connected_ && connected_since > 0)
+            ? static_cast<uint32_t>((now - connected_since) / 1000000)
+            : 0;
+    status.ever_sent = last_send > 0;
+    status.last_send_age_sec =
+        last_send > 0 ? static_cast<uint32_t>((now - last_send) / 1000000) : 0;
+    return status;
 }
 
 void NtripPushClient::task_entry(void *argument) {
@@ -138,10 +157,14 @@ void NtripPushClient::run() {
             }
             failures = 0;
         }
-        if (xQueueReceive(queue_, &packet, pdMS_TO_TICKS(1000)) == pdTRUE &&
-            !send_all(packet.data, packet.length)) {
-            set_message("write failed; retrying", false);
-            close_socket();
+        if (xQueueReceive(queue_, &packet, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            if (send_all(packet.data, packet.length)) {
+                last_send_us_ = esp_timer_get_time();
+            } else {
+                ++reconnects_;
+                set_error("write failed; reconnecting");
+                close_socket();
+            }
         }
     }
     close_socket();
@@ -156,7 +179,7 @@ bool NtripPushClient::connect_caster() {
         password = password_;
     }
     if (!connect_socket()) {
-        set_message("TCP connect failed", false);
+        set_error("TCP connect failed");
         return false;
     }
 
@@ -177,7 +200,7 @@ bool NtripPushClient::connect_caster() {
     }
     if (!send_all(
             reinterpret_cast<const uint8_t *>(request.data()), request.size())) {
-        set_message("handshake write failed", false);
+        set_error("handshake write failed");
         close_socket();
         return false;
     }
@@ -187,12 +210,12 @@ bool NtripPushClient::connect_caster() {
         response.rfind("HTTP/1.1 200", 0) == 0 ||
         response.rfind("HTTP/1.0 200", 0) == 0;
     if (!accepted) {
-        set_message(response.empty() ? "empty response" : "rejected: " + response,
-                    false);
+        set_error(response.empty() ? "empty response" : "rejected: " + response);
         close_socket();
         return false;
     }
     if (response.rfind("HTTP/", 0) == 0) drain_headers();
+    connected_since_us_ = esp_timer_get_time();
     set_message(
         protocol_ == NtripProtocol::kV2 ? "connected (v2)" : "connected (v1)",
         true);
@@ -342,6 +365,13 @@ void NtripPushClient::set_message(
     std::lock_guard lock(config_mutex_);
     message_ = message;
     connected_ = connected;
+}
+
+void NtripPushClient::set_error(const std::string &error) {
+    std::lock_guard lock(config_mutex_);
+    last_error_ = error;
+    message_ = error;
+    ESP_LOGW(kTag, "%s: %s", label_, error.c_str());
 }
 
 std::string NtripPushClient::base64(const std::string &input) {

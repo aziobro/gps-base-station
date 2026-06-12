@@ -37,6 +37,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Load machine-specific defaults (git-ignored). A caller-supplied environment
+# variable still wins, so capture those first and re-apply after sourcing.
+# See config.sample.env for documentation.
+_ENV_DEVICE_HOST="${DEVICE_HOST:-}"
+_ENV_ADMIN_USER="${ADMIN_USER:-}"
+_ENV_ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+# shellcheck disable=SC1091
+[ -f "$REPO_ROOT/config.env" ] && source "$REPO_ROOT/config.env"
+[ -n "$_ENV_DEVICE_HOST" ] && DEVICE_HOST="$_ENV_DEVICE_HOST"
+[ -n "$_ENV_ADMIN_USER" ] && ADMIN_USER="$_ENV_ADMIN_USER"
+[ -n "$_ENV_ADMIN_PASSWORD" ] && ADMIN_PASSWORD="$_ENV_ADMIN_PASSWORD"
+
 VERSION_FILE="$REPO_ROOT/version.txt"
 APP_BIN="$REPO_ROOT/build/gps_base_station.bin"
 ADMIN_USER="${ADMIN_USER:-admin}"

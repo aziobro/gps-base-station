@@ -29,6 +29,9 @@ c6_update/
 # Local credentials
 src/secrets.h
 
+# Machine-specific build/deploy config (copy from config.sample.env)
+config.env
+
 # Device-local HTTPS credentials (generate with tools/generate-https-certs.sh)
 main/certs/*.pem
 

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <vector>
 
+#include "app_config.hpp"
 #include "esp_check.h"
 #include "esp_hosted.h"
 #include "esp_log.h"
@@ -130,7 +131,7 @@ int WifiManager::rssi() const {
 
 std::string WifiManager::ssid() const {
     if (!connected_) {
-        return access_point_active_ ? kAccessPointSsid : "";
+        return access_point_active_ ? config::kAccessPointSsid : "";
     }
     wifi_ap_record_t record{};
     if (esp_wifi_sta_get_ap_info(&record) != ESP_OK) return {};
@@ -147,7 +148,7 @@ std::string WifiManager::ip_address() const {
 }
 
 std::string WifiManager::access_point_ssid() const {
-    return access_point_active_ ? std::string(kAccessPointSsid) : std::string();
+    return access_point_active_ ? std::string(config::kAccessPointSsid) : std::string();
 }
 
 std::string WifiManager::access_point_ip() const {
@@ -228,7 +229,7 @@ void WifiManager::handle_event(esp_event_base_t event_base, int32_t event_id,
     }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
-        ESP_LOGI(kTag, "SoftAP started — beaconing as %s", kAccessPointSsid);
+        ESP_LOGI(kTag, "SoftAP started — beaconing as %s", config::kAccessPointSsid);
         return;
     }
 
@@ -273,15 +274,30 @@ esp_err_t WifiManager::configure_station(
     return esp_wifi_set_config(WIFI_IF_STA, &config);
 }
 
-esp_err_t WifiManager::enable_access_point() {
-    wifi_config_t config{};
+void WifiManager::fill_ap_config(wifi_config_t &config) const {
     strlcpy(reinterpret_cast<char *>(config.ap.ssid),
-            kAccessPointSsid, sizeof(config.ap.ssid));
-    config.ap.ssid_len = strlen(kAccessPointSsid);
+            config::kAccessPointSsid, sizeof(config.ap.ssid));
+    config.ap.ssid_len = strlen(config::kAccessPointSsid);
     config.ap.channel = 1;
     config.ap.max_connection = 4;
-    config.ap.authmode = WIFI_AUTH_OPEN;
     config.ap.dtim_period = 1;  // wake PS clients every beacon — lower latency
+
+    // WPA2-PSK secured. Fall back to the documented default when no password
+    // is stored or a stored one is too short for WPA2 (needs 8-63 chars).
+    std::string password =
+        storage_ ? storage_->ap_password() : std::string();
+    if (password.size() < 8 || password.size() > 63) {
+        password = config::kDefaultApPassword;
+    }
+    config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    config.ap.pmf_cfg.required = false;
+    strlcpy(reinterpret_cast<char *>(config.ap.password),
+            password.c_str(), sizeof(config.ap.password));
+}
+
+esp_err_t WifiManager::enable_access_point() {
+    wifi_config_t config{};
+    fill_ap_config(config);
 
     // Pure AP — used only when no station credentials are stored. Stop any
     // running mode first, then bring the interface up as a dedicated AP.
@@ -301,7 +317,7 @@ esp_err_t WifiManager::enable_access_point() {
     access_point_active_ = true;
     connected_ = false;
     last_retry_ms_ = now_ms();
-    ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", kAccessPointSsid);
+    ESP_LOGI(kTag, "AP active: %s at 192.168.4.1", config::kAccessPointSsid);
     return ESP_OK;
 }
 
@@ -320,13 +336,7 @@ esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
         esp_wifi_set_mode(WIFI_MODE_APSTA), kTag, "APSTA mode failed");
 
     wifi_config_t ap_config{};
-    strlcpy(reinterpret_cast<char *>(ap_config.ap.ssid),
-            kAccessPointSsid, sizeof(ap_config.ap.ssid));
-    ap_config.ap.ssid_len = strlen(kAccessPointSsid);
-    ap_config.ap.channel = 1;
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.authmode = WIFI_AUTH_OPEN;
-    ap_config.ap.dtim_period = 1;  // wake PS clients every beacon — lower latency
+    fill_ap_config(ap_config);
 
     ESP_RETURN_ON_ERROR(
         esp_wifi_set_config(WIFI_IF_AP, &ap_config), kTag, "AP config failed");
@@ -344,7 +354,7 @@ esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
     last_retry_ms_ = 0;
     request_connect();
     ESP_LOGI(kTag, "AP+STA active: AP %s + station \"%s\"",
-             kAccessPointSsid, credentials.ssid.c_str());
+             config::kAccessPointSsid, credentials.ssid.c_str());
     return ESP_OK;
 }
 
@@ -353,6 +363,20 @@ esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
     // Bring the radio back up in AP+STA so the SoftAP stays reachable while the
     // newly entered network is attempted.
     return enable_ap_sta(credentials);
+}
+
+esp_err_t WifiManager::apply_ap_settings() {
+    // Re-applies the SoftAP config (picking up a freshly stored password)
+    // without tearing the radio down, so existing station links survive.
+    wifi_config_t ap_config{};
+    fill_ap_config(ap_config);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (err == ESP_OK) {
+        ESP_LOGI(kTag, "SoftAP password updated");
+    } else {
+        ESP_LOGW(kTag, "SoftAP reconfigure failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 void WifiManager::request_connect() {

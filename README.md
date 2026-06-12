@@ -15,10 +15,12 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 - **On-device touchscreen UI** — 720×720 capacitive touch LCD with a tabbed LVGL interface (Status, NTRIP, Position, System, Debug); configure WiFi and NTRIP credentials, browse the SD card, start a survey, and toggle RINEX collection without a browser
 - **C6 coprocessor firmware update** — flash the bundled ESP32-C6 WiFi firmware from the System tab; the running and available versions are shown side by side
 - **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, SD card storage, and RINEX collection status
+- **Web console log viewer** — `/logs` streams the recent ESP-IDF console output (NTRIP, WiFi, SD errors) for remote debugging without a serial cable
+- **NTRIP push diagnostics** — per-service connection uptime, reconnect count, last error, and data-freshness shown on the status page
 - **Web configuration page** — configure all NTRIP credentials with enable/disable toggles per service
 - **HTTPS administration** — TLS-protected status, configuration, sky plot, SD card, and OTA pages
 - **OTA firmware updates** — upload new firmware via HTTPS, no USB required after initial flash
-- **WiFi provisioning** — hotspot (AP) mode with network scan if no WiFi is configured
+- **WiFi provisioning** — WPA2-secured hotspot (AP) mode with network scan if no WiFi is configured; AP password is configurable on the `/config` page and stored in NVS
 - **NVS storage** — base position and credentials survive power cycles
 - **Password-protected web UI** — Basic Auth on all pages
 
@@ -86,6 +88,15 @@ Native [ESP-IDF](https://github.com/espressif/esp-idf) v6.0.1 project. Uses `esp
 git clone https://github.com/aziobro/gps-base-station.git
 cd gps-base-station
 ```
+
+Copy the sample config and edit it for your machine (toolchain path, serial port, device IP, certificate SAN). `config.env` is git-ignored, so machine-specific values stay out of version control:
+
+```bash
+cp config.sample.env config.env
+$EDITOR config.env
+```
+
+Every value is optional — `idf.sh`, `tools/release.sh`, and `tools/generate-https-certs.sh` fall back to built-in defaults, and a real environment variable (e.g. `PORT=/dev/ttyX ./idf.sh flash`) always overrides `config.env`. See [config.sample.env](config.sample.env) for the documented list.
 
 `idf.sh` is a thin wrapper that activates the ESP-IDF environment and runs `idf.py`:
 
@@ -175,7 +186,7 @@ A failed OTA rolls back automatically — the new image must pass a 30-second he
 
 If no WiFi credentials are stored, the device starts in AP mode:
 
-1. Connect to the `GPS-BaseStation` WiFi network (open, no password)
+1. Connect to the `GPS-BaseStation` WiFi network. It is **WPA2-secured**; the default password is `gpsbase-rtk` (change it later on the `/config` page — it is stored in NVS).
 2. Navigate to `http://192.168.4.1`
 3. Click **Scan**, select your network, enter the password, and click **Connect**
 4. The device restarts and connects to your WiFi
@@ -187,9 +198,10 @@ Once connected, find the device IP from your router or the serial monitor output
 | URL | Description |
 |-----|-------------|
 | `https://<ip>/` | Status page — satellite counts, RTCM throughput, service status, SD card stats |
-| `https://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position |
+| `https://<ip>/config` | Configuration — NTRIP credentials, service toggles, manual base position, WiFi, hotspot (AP) password |
 | `https://<ip>/skyplot` | Satellite azimuth/elevation sky plot |
 | `https://<ip>/files` | SD card file browser — browse, download, create folders, rename, delete; select multiple `.rnx` files to merge & download |
+| `https://<ip>/logs` | Console log viewer — recent ESP-IDF output for remote debugging |
 | `https://<ip>/update` | OTA firmware update |
 | `http://<ip>/ca.crt` | Download the local CA certificate |
 
@@ -380,24 +392,27 @@ During OTA, active provider and local rover streams are suspended before flash w
 ```
 main/
 ├── app_main.cpp       — ESP-IDF startup, UART init, SD mount, web server start
+├── app_config.hpp     — compile-time constants (NTRIP hosts, AP SSID + default password, rates)
 ├── base_station.*     — SURVEY to BASE_TX state machine and RTCM fan-out
-├── storage.*          — NVS persistence (position, WiFi, NTRIP credentials)
+├── storage.*          — NVS persistence (position, WiFi, AP password, NTRIP credentials)
 ├── um980.*            — UM980 command channel
 ├── survey.*           — block-averaged survey and satellite parsing
 ├── local_caster.*     — local NTRIP caster (port 2101, up to 8 clients)
-├── ntrip_push.*       — isolated upstream NTRIP workers (RTK2go, Onocoy, RTKdata)
+├── ntrip_push.*       — isolated upstream NTRIP workers (RTK2go, Onocoy, RTKdata) + diagnostics
 ├── sd_manager.*       — microSD via SDSPI (LDO enable, mount, browse, disk stats)
 ├── rinex_logger.*     — RINEX 3.03 observation file writer (RANGEA parser, 30 s epochs, hourly rotation)
-├── web_server.*       — authenticated status, config, sky plot, SD browser, RINEX toggle, OTA
+├── log_buffer.*       — esp_log ring-buffer capture served at /logs
+├── web_server.*       — authenticated status, config, logs, sky plot, SD browser, RINEX toggle, OTA
 ├── display.*          — Waveshare BSP bring-up (MIPI-DSI + GT911 touch)
 ├── ui.*               — LVGL tabbed touchscreen UI and C6 firmware update
 ├── lv_mem_custom.c    — routes LVGL allocations to PSRAM
 ├── c6_slave_fw.bin    — bundled ESP32-C6 esp_hosted firmware (embedded for on-device update)
-└── wifi_manager.*     — event-driven station/AP recovery
+└── wifi_manager.*     — event-driven station/AP recovery; WPA2 SoftAP
 partitions.csv         — OTA flash layout (ota_0 / ota_1 / otadata)
 sdkconfig.defaults     — ESP-IDF kconfig overrides (socket pool, lwIP tuning)
 version.txt            — single source of truth for the firmware version
-idf.sh                 — ESP-IDF environment + idf.py wrapper
+config.sample.env      — sample machine-specific build/deploy config (copy to config.env)
+idf.sh                 — ESP-IDF environment + idf.py wrapper (reads config.env)
 tools/
 ├── release.sh         — bump → build → push (USB/OTA) → verify on device
 ├── fw_version.py      — read the version embedded in a built .bin
@@ -406,6 +421,21 @@ bootstrap/             — minimal recovery firmware (WiFi + HTTPS /update only)
 ├── main/              — bootstrap app + web server; symlinks parent storage/wifi/certs
 ├── partitions.csv     — same 6 MB OTA layout as production
 └── CMakeLists.txt     — reuses parent managed_components via EXTRA_COMPONENT_DIRS
+docs/agent-memory/     — version-controlled project knowledge notes (see below)
+```
+
+### Project knowledge notes
+
+`docs/agent-memory/` holds version-controlled notes about the project's
+architecture and hard-won fixes (build/deploy runbook, NTRIP root-cause, etc.)
+so the knowledge survives a machine switch. These are also used as the AI
+assistant's persistent memory: the local `~/.claude/.../memory` directory is a
+symlink into this folder. On a fresh clone, recreate the symlink once if you use
+that workflow:
+
+```bash
+ln -s "$(pwd)/docs/agent-memory" \
+  ~/.claude/projects/-Users-<you>-Development-GPS/memory
 ```
 
 ---

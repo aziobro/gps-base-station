@@ -21,6 +21,13 @@ inline constexpr int kRtcmBeidouRateSec = 1;
 inline constexpr uint16_t kLocalNtripPort = 2101;
 inline constexpr char kLocalMountpoint[] = "BASE0";
 
+// SoftAP (hotspot) defaults. The AP is secured with WPA2; this password is
+// used until one is set on the /config page (stored in NVS). It must be 8-63
+// characters. Documented in the README so a fresh device can be reached before
+// any custom password is configured.
+inline constexpr char kAccessPointSsid[] = "GPS-BaseStation";
+inline constexpr char kDefaultApPassword[] = "gpsbase-rtk";
+
 inline constexpr char kRtk2goHost[] = "rtk2go.com";
 inline constexpr uint16_t kRtk2goPort = 2101;
 inline constexpr char kOnocoyHost[] = "servers.onocoy.com";

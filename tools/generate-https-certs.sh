@@ -5,6 +5,13 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 CERT_DIR="$ROOT_DIR/main/certs"
 OPENSSL=${OPENSSL:-openssl}
 
+# Load machine-specific SAN values (git-ignored). See config.sample.env.
+# shellcheck disable=SC1091
+[ -f "$ROOT_DIR/config.env" ] && . "$ROOT_DIR/config.env"
+CERT_DNS=${CERT_DNS:-gps-base.local}
+CERT_IP=${CERT_IP:-192.168.8.186}
+CERT_AP_IP=${CERT_AP_IP:-192.168.4.1}
+
 mkdir -p "$CERT_DIR"
 
 "$OPENSSL" ecparam -name prime256v1 -genkey \
@@ -19,14 +26,14 @@ mkdir -p "$CERT_DIR"
 "$OPENSSL" req -new -sha256 \
     -key "$CERT_DIR/server-key.pem" \
     -out "$CERT_DIR/server.csr" \
-    -subj "/CN=gps-base.local/O=GPS Base Station"
+    -subj "/CN=$CERT_DNS/O=GPS Base Station"
 
 EXT_FILE="$CERT_DIR/server-ext.cnf"
 printf '%s\n' \
     "basicConstraints=CA:FALSE" \
     "keyUsage=digitalSignature,keyEncipherment" \
     "extendedKeyUsage=serverAuth" \
-    "subjectAltName=DNS:gps-base.local,IP:192.168.8.195,IP:192.168.4.1" \
+    "subjectAltName=DNS:$CERT_DNS,IP:$CERT_IP,IP:$CERT_AP_IP" \
     > "$EXT_FILE"
 
 "$OPENSSL" x509 -req -sha256 -days 1825 \

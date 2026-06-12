@@ -51,6 +51,11 @@ public:
     WifiCredentials load_wifi() const;
     esp_err_t save_wifi(const WifiCredentials &credentials);
 
+    // SoftAP (hotspot) WPA2 password. Empty string means "use the built-in
+    // default" (see config::kDefaultApPassword).
+    std::string ap_password() const;
+    esp_err_t save_ap_password(const std::string &password);
+
     // Global NTRIP push on/off (survives power cycles). Defaults to enabled.
     bool ntrip_streams_enabled(bool default_value = true) const;
     esp_err_t set_ntrip_streams_enabled(bool enabled);

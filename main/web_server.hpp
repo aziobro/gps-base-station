@@ -41,6 +41,9 @@ private:
     static esp_err_t position_handler(httpd_req_t *request);
     static esp_err_t survey_handler(httpd_req_t *request);
     static esp_err_t wifi_handler(httpd_req_t *request);
+    static esp_err_t ap_password_handler(httpd_req_t *request);
+    static esp_err_t logs_page_handler(httpd_req_t *request);
+    static esp_err_t logs_data_handler(httpd_req_t *request);
     static esp_err_t http_gateway_handler(httpd_req_t *request);
     static esp_err_t ca_certificate_handler(httpd_req_t *request);
     static esp_err_t files_page_handler(httpd_req_t *request);

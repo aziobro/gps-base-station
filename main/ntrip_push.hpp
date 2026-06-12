@@ -19,9 +19,14 @@ enum class NtripProtocol {
 struct NtripStatus {
     bool enabled = false;
     bool connected = false;
-    std::string message;
-    uint64_t bytes_sent = 0;
-    uint32_t dropped_batches = 0;
+    std::string message;            // live state (connecting / connected / …)
+    uint64_t bytes_sent = 0;        // RTCM payload bytes pushed to the caster
+    uint32_t dropped_batches = 0;   // batches discarded because the queue was full
+    uint32_t reconnects = 0;        // times a live connection dropped and reconnected
+    std::string last_error;         // sticky last failure/rejection reason
+    uint32_t connected_sec = 0;     // age of the current connection (0 when down)
+    uint32_t last_send_age_sec = 0; // seconds since the last successful payload send
+    bool ever_sent = false;         // false until the first payload byte is sent
 };
 
 class NtripPushClient {
@@ -62,11 +67,16 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<uint64_t> bytes_sent_{0};
     std::atomic<uint32_t> dropped_batches_{0};
+    std::atomic<uint32_t> reconnects_{0};
+    // Microsecond timestamps (esp_timer) for connection uptime / send freshness.
+    std::atomic<int64_t> connected_since_us_{0};
+    std::atomic<int64_t> last_send_us_{0};
     mutable std::mutex config_mutex_;
     bool enabled_ = false;
     std::string mountpoint_;
     std::string password_;
     std::string message_ = "disabled";
+    std::string last_error_;
     int socket_ = -1;
     // Cached resolved address — avoids a blocking getaddrinfo() on every
     // reconnect, which holds the lwIP mutex and stalls HTTPS handshakes.
@@ -82,5 +92,8 @@ private:
     void drain_headers();
     void close_socket();
     void set_message(const std::string &message, bool connected);
+    // Records a sticky failure/rejection reason (survives later state changes)
+    // and mirrors it into the live message.
+    void set_error(const std::string &error);
     static std::string base64(const std::string &input);
 };
