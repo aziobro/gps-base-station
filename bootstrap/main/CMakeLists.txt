@@ -1,0 +1,27 @@
+idf_component_register(
+    SRCS
+        "app_main_bootstrap.cpp"
+        "web_server_bootstrap.cpp"
+        "../../main/storage.cpp"
+        "../../main/wifi_manager.cpp"
+    INCLUDE_DIRS
+        "."
+        "../../main"
+    REQUIRES
+        esp_driver_gpio
+        esp_event
+        esp_http_server
+        esp_https_server
+        esp_netif
+        esp_system
+        esp_timer
+        esp_wifi
+        esp_hosted
+        app_update
+        mbedtls
+        nvs_flash
+    EMBED_TXTFILES
+        "server-cert.pem"
+        "server-key.pem"
+        "ca-cert.pem"
+)
