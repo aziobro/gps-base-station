@@ -97,6 +97,15 @@ cd gps-base-station
 
 Override the serial port with `PORT=/dev/tty.yourdevice ./idf.sh flash`.
 
+> **Always build through `./idf.sh`** (or `tools/release.sh`, which calls it). It sources `export.sh` so `idf.py` runs inside the IDF Python virtualenv (`~/.espressif/python_env/idf6.0_py3.14_env`). Invoking `idf.py` directly from a normal shell picks up the system/pyenv Python instead and fails with `No module named 'click'`.
+
+To run ad-hoc `idf.py` commands (e.g. against a subproject), activate the environment once in your current shell and then call `idf.py` directly:
+
+```bash
+source ./idf.sh                 # activate the IDF env in this shell
+idf.py -C bootstrap build       # build the recovery firmware (see below)
+```
+
 Generate a device-local certificate authority and server certificate before the first build:
 
 ```bash
@@ -114,6 +123,25 @@ The first install must go over USB so the bootloader and partition table land al
 ```bash
 ./idf.sh set-target esp32p4   # one-time, on a fresh build tree
 ./idf.sh flash monitor
+```
+
+### Recovery Firmware (Bootstrap)
+
+`bootstrap/` is a minimal (~920 KB) standalone firmware whose only job is to bring up WiFi and serve the HTTPS `/update` page. It exists to break the **OTA catch-22**: if the main application won't boot, or a build won't fit the OTA slot, you can recover over the air instead of needing USB access to the device.
+
+It shares the production partition table (two 6 MB app slots) and reuses the parent project's `storage` and `wifi_manager` sources plus its already-downloaded `managed_components/`, so no extra dependency fetch is needed.
+
+```bash
+./tools/generate-https-certs.sh   # once — bootstrap/main/*.pem symlink into main/certs/
+source ./idf.sh                   # activate the IDF env
+idf.py -C bootstrap build         # → bootstrap/build/gps_bootstrap.bin
+idf.py -C bootstrap flash         # flash the recovery image over USB
+```
+
+Once the bootstrap firmware is running, push the full application to it over the air exactly like a normal release:
+
+```bash
+ADMIN_PASSWORD=secret tools/release.sh ota <device-ip>
 ```
 
 ---
@@ -374,6 +402,10 @@ tools/
 ├── release.sh         — bump → build → push (USB/OTA) → verify on device
 ├── fw_version.py      — read the version embedded in a built .bin
 └── generate-https-certs.sh — create the device-local CA + server cert
+bootstrap/             — minimal recovery firmware (WiFi + HTTPS /update only)
+├── main/              — bootstrap app + web server; symlinks parent storage/wifi/certs
+├── partitions.csv     — same 6 MB OTA layout as production
+└── CMakeLists.txt     — reuses parent managed_components via EXTRA_COMPONENT_DIRS
 ```
 
 ---

@@ -31,3 +31,7 @@ src/secrets.h
 
 # Device-local HTTPS credentials (generate with tools/generate-https-certs.sh)
 main/certs/*.pem
+
+# Bootstrap recovery firmware — generated lockfile and cert symlinks into main/certs/
+bootstrap/dependencies.lock
+bootstrap/main/*.pem
