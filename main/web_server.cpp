@@ -163,8 +163,8 @@ esp_err_t AdminWebServer::start(
     httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
     tls_config.httpd.max_uri_handlers = 25;
     tls_config.httpd.stack_size = 12288;
-    tls_config.httpd.recv_wait_timeout = 10;
-    tls_config.httpd.send_wait_timeout = 10;
+    tls_config.httpd.recv_wait_timeout = 30;
+    tls_config.httpd.send_wait_timeout = 30;
     tls_config.httpd.lru_purge_enable = true;
     // Allow up to seven dashboard tabs plus one administrative request (for
     // example, configuration or OTA) without evicting an active TLS session.
@@ -248,7 +248,7 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/files/mkdir", HTTP_POST, files_mkdir_handler, this},
         {"/rinex/toggle", HTTP_POST, rinex_toggle_handler, this},
         {"/ntrip/toggle", HTTP_POST, ntrip_toggle_handler, this},
-        {"/files/rinex_merge", HTTP_GET, files_rinex_merge_handler, this},
+        {"/files/rinex_merge", HTTP_POST, files_rinex_merge_handler, this},
     };
     for (const auto &handler : handlers) {
         ESP_RETURN_ON_ERROR(
@@ -824,23 +824,63 @@ esp_err_t AdminWebServer::update_page_handler(httpd_req_t *request) {
 
     const std::string content = R"HTML(
 <h2>Firmware Update</h2>
-<p>Select the ESP-IDF application image. The upload is sent as raw binary and
-validated before the boot partition changes.</p>
-<input id='firmware' type='file' accept='.bin'>
-<button id='upload'>Upload &amp; Restart</button>
-<pre id='result'></pre>
+<p>Select the ESP-IDF application image (.bin). The upload is sent as raw binary
+and validated before the boot partition changes. The device restarts automatically
+after a successful flash.</p>
+<form id='otaForm'>
+  <input type='file' id='otaFile' accept='.bin' style='display:none'
+    onchange='document.getElementById("otaName").textContent=this.files[0].name'>
+  <div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+    <button type='button' onclick='document.getElementById("otaFile").click()'>Choose .bin</button>
+    <span id='otaName' style='opacity:.6;font-size:0.85em'>No file chosen</span>
+  </div>
+  <div id='otaProgress' style='display:none;margin-top:12px'>
+    <div style='background:#222;border-radius:3px;height:8px;overflow:hidden'>
+      <div id='otaBar' style='background:#0f0;height:100%;width:0%;transition:width 0.3s'></div>
+    </div>
+    <p id='otaStatus' style='margin:4px 0 0;font-size:0.85em;opacity:.8'>Uploading...</p>
+  </div>
+  <button type='submit' style='margin-top:12px' onclick='startOTA(event)'>Upload &amp; Flash</button>
+</form>
 <script>
-document.getElementById('upload').onclick=async function(){
-  const f=document.getElementById('firmware').files[0];
-  if(!f)return;
-  const out=document.getElementById('result');
-  out.textContent='Uploading...';
-  try{
-    const r=await fetch('/update',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:f});
-    out.textContent=await r.text();
-  }catch(e){out.textContent='Upload failed: '+e;}
-};
-</script><p><a href='/'>Back</a></p>)HTML";
+function startOTA(e){
+  e.preventDefault();
+  var file=document.getElementById('otaFile').files[0];
+  if(!file){alert('Choose a .bin file first.');return;}
+  if(!confirm('Flash '+file.name+' ('+(file.size/1024).toFixed(1)+' KB)?\nThe device will restart after flashing.'))return;
+  var progress=document.getElementById('otaProgress');
+  var bar=document.getElementById('otaBar');
+  var status=document.getElementById('otaStatus');
+  progress.style.display='block';
+  var xhr=new XMLHttpRequest();
+  xhr.open('POST','/update');
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){
+      var pct=Math.round(e.loaded/e.total*100);
+      bar.style.width=pct+'%';
+      status.textContent='Uploading... '+pct+'%';
+    }
+  };
+  xhr.onload=function(){
+    bar.style.width='100%';
+    if(xhr.status===200){
+      bar.style.background='#4f4';
+      status.textContent=xhr.responseText;
+      setTimeout(function(){window.location.href='/';},9000);
+    }else{
+      bar.style.background='#f44';
+      status.textContent='Failed: '+xhr.responseText;
+    }
+  };
+  xhr.onerror=function(){
+    bar.style.background='#f44';
+    status.textContent='Upload error — check connection.';
+  };
+  xhr.send(file);
+}
+</script>
+<p><a href='/'>Back</a></p>)HTML";
     return server->send_page(request, "Firmware Update", content);
 }
 
@@ -863,8 +903,10 @@ esp_err_t AdminWebServer::update_upload_handler(httpd_req_t *request) {
     }
 
     esp_ota_handle_t handle = 0;
-    esp_err_t result = esp_ota_begin(
-        partition, static_cast<size_t>(request->content_len), &handle);
+    // OTA_WITH_SEQUENTIAL_WRITES erases sectors lazily as each sector boundary
+    // is crossed, avoiding a large synchronous upfront erase that would stall
+    // the connection during the request body receive phase.
+    esp_err_t result = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &handle);
     if (result != ESP_OK) {
         server->station_->set_streams_suspended(false);
         return httpd_resp_send_err(
@@ -1293,8 +1335,11 @@ function dlFile(i){window.location.href='/files/download?path='+encodeURICompone
 function mergeSelected(){
   var cbs=document.querySelectorAll('.rnx-cb:checked');
   if(cbs.length<2){alert('Select at least 2 RINEX files to merge.');return;}
-  var params=Array.from(cbs).map(function(cb){return'f='+encodeURIComponent(cb.getAttribute('data-path'));}).join('&');
-  window.location.href='/files/rinex_merge?'+params;
+  var files=Array.from(cbs).map(function(cb){return cb.getAttribute('data-path');});
+  fetch('/files/rinex_merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:files})})
+    .then(function(r){if(!r.ok)throw new Error('Merge failed');return r.blob();})
+    .then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='merged.rnx';a.click();URL.revokeObjectURL(a.href);})
+    .catch(function(e){alert(e.message||'Merge failed');});
 }
 function renameEntry(i){
   var e=fileEntries[i];
@@ -1461,40 +1506,35 @@ esp_err_t AdminWebServer::ntrip_toggle_handler(httpd_req_t *request) {
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
-// GET /files/rinex_merge?f=path1&f=path2...
+// POST /files/rinex_merge  body: {"files":["/path/a.rnx","/path/b.rnx",...]}
 // Streams a merged RINEX file: header from the first file, then observation
 // epochs from all files (skipping subsequent headers).
 esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
 
-    // Collect all 'f' query parameters.
-    size_t qlen = httpd_req_get_url_query_len(request);
-    if (qlen == 0) {
-        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "No files");
-    }
-    std::string qbuf(qlen + 1, '\0');
-    if (httpd_req_get_url_query_str(request, qbuf.data(), qbuf.size()) != ESP_OK) {
-        return httpd_resp_send_err(
-            request, HTTPD_400_BAD_REQUEST, "Query parse failed");
+    const std::string body = read_body(request, 4096);
+    if (body.empty()) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "No body");
     }
 
+    // Parse JSON string array under key "files": ["path1","path2",...]
     std::vector<std::string> paths;
-    size_t pos = 0;
-    while (pos < qbuf.size()) {
-        size_t eq = qbuf.find('=', pos);
-        if (eq == std::string::npos) break;
-        const std::string key = qbuf.substr(pos, eq - pos);
-        size_t amp = qbuf.find('&', eq + 1);
-        if (amp == std::string::npos) amp = qbuf.size();
-        if (key == "f") {
-            const std::string val =
-                url_decode(qbuf.substr(eq + 1, amp - eq - 1));
+    const std::string needle = "\"files\":[";
+    size_t arr = body.find(needle);
+    if (arr != std::string::npos) {
+        arr += needle.size();
+        while (arr < body.size() && body[arr] != ']') {
+            size_t qs = body.find('"', arr);
+            if (qs == std::string::npos) break;
+            size_t qe = body.find('"', qs + 1);
+            if (qe == std::string::npos) break;
+            const std::string val = body.substr(qs + 1, qe - qs - 1);
             if (!val.empty() && SdManager::safe_path(val.c_str())) {
                 paths.push_back(val);
             }
+            arr = qe + 1;
         }
-        pos = amp + 1;
     }
     if (paths.empty()) {
         return httpd_resp_send_err(

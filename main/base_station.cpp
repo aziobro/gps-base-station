@@ -141,7 +141,7 @@ void BaseStation::set_streams_enabled(bool enabled) {
 }
 
 void BaseStation::apply_persisted_streams() {
-    external_suspend_ = !storage_.ntrip_streams_enabled(true);
+    external_suspend_ = true;  // always start disabled; user re-enables each session
     apply_stream_state();
 }
 
