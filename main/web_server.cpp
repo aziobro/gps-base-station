@@ -1590,16 +1590,6 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
     httpd_resp_set_hdr(request, "Content-Disposition",
                        "attachment; filename=\"merged.rnx\"");
 
-    // Disable Nagle on this connection so each 1 KB chunk is sent immediately
-    // rather than waiting ~40 ms for a delayed-ACK of the preceding chunk
-    // header.  httpd_req_get_sockfd() returns the underlying TCP socket even
-    // for TLS sessions, so setsockopt() reaches the lwIP stack directly.
-    {
-        const int flag = 1;
-        setsockopt(httpd_req_to_sockfd(request),
-                   IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    }
-
     char buf[1024];
     bool header_sent = false;
 

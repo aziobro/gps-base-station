@@ -11,7 +11,7 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 - **Local NTRIP caster** — port 2101, up to 8 simultaneous rover clients on the local network
 - **SD card file browser** — browse, download, rename, delete, and create directories via the web UI; `logs/` and `rawdata/` directories created automatically on first mount
 - **SD card storage stats** — used / free / total displayed on both the status page and file browser with a visual progress bar
-- **RINEX raw data collection** — toggle from the status page to record raw GNSS observations (30-second epochs, 1-hour files) to `/sdcard/rawdata/` in RINEX 3.03 format for post-processing with OPUS or similar services; multi-file merge download built in
+- **RINEX raw data collection** — toggle from the status page to record raw GNSS observations (30-second epochs, 1-hour files) to `/sdcard/rawdata/` in RINEX 3.03 format for post-processing with OPUS or similar services; multi-file merge download (up to 15+ files) with live progress indicator built in
 - **On-device touchscreen UI** — 720×720 capacitive touch LCD with a tabbed LVGL interface (Status, NTRIP, Position, System, Debug); configure WiFi and NTRIP credentials, browse the SD card, start a survey, and toggle RINEX collection without a browser
 - **C6 coprocessor firmware update** — flash the bundled ESP32-C6 WiFi firmware from the System tab; the running and available versions are shown side by side
 - **Web status page** — live satellite counts, RTCM throughput, provider state, WiFi signal strength, heap, SD card storage, and RINEX collection status
@@ -254,7 +254,7 @@ The base station can record raw GNSS observations in **RINEX 3.03** format for p
 2. COM3 switches from RTCM binary output to ASCII `RANGEA` (raw observations) at 30-second intervals — RTCM push to RTK2go, Onocoy, and RTKdata is automatically suspended while collecting
 3. One-hour files are written to `/sdcard/rawdata/` named `BASE_YYYYMMDD_HHMMSS.rnx`
 4. Click **Stop** to close the current file and restore full RTCM output
-5. Navigate to **SD card files → rawdata**, select two or more `.rnx` files, and click **Merge & Download** to receive a single merged RINEX file
+5. Navigate to **SD card files → rawdata**, select two or more `.rnx` files (up to 15+ supported), and click **Merge & Download** — a progress indicator shows elapsed time and bytes received; do not navigate away until the download completes
 
 ### Uploading to OPUS
 
@@ -343,6 +343,7 @@ During OTA, active provider and local rover streams are suspended before flash w
 | RTK2go bans the device IP | Connected before UM980 was tracking | Verify firmware version ≥ ota23 — NTRIP clients now wait for first RTCM batch |
 | RINEX collection won't start | Device not in Base TX mode | Complete survey-in or set a manual position first |
 | RINEX file has no observations | UM980 not tracking satellites | Wait for satellite lock before starting collection |
+| RINEX merge download stalls or progress stops | Large multi-file merges take time | The merge streams at ~22 KB/s; 15 one-hour files (~5 MB) take about 4 minutes — keep the tab open and wait |
 
 ---
 
