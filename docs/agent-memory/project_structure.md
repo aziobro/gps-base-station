@@ -16,11 +16,11 @@ metadata:
 ## Key files
 - `main/app_main.cpp` — startup: NVS, UART, WiFi, BaseStation, SD, Display/UI, WebServer, OTA validate task
 - `main/display.hpp/.cpp` — Waveshare BSP wrapper (ST7703 + GT911 + LVGL)
-- `main/ui.hpp/.cpp` — 4-tab LVGL touchscreen UI (Status/NTRIP/Position/System)
+- `main/ui.hpp/.cpp` — 5-tab LVGL touchscreen UI (Status/NTRIP/Position/System/Debug). WiFi modal also edits the hotspot/AP password (`on_ap_save` → storage + `apply_ap_settings()`). NTRIP tab shows reconnects/uptime/freshness. Debug tab renders `log_buffer::snapshot()` tail.
 - `main/base_station.hpp/.cpp` — survey-in state machine → fixed base TX; exposes `status()`, `healthy()`
 - `main/wifi_manager.hpp/.cpp` — esp_hosted + WiFi station/AP fallback; AP is WPA2 (password in NVS, default `config::kDefaultApPassword`), `apply_ap_settings()` reconfigures live
 - `main/web_server.hpp/.cpp` — HTTPS admin panel (port 443): status, /config (NTRIP+WiFi+AP password), /logs console viewer, file browser, OTA
-- `main/log_buffer.hpp/.cpp` — esp_log vprintf hook → 16 KB ring buffer; served at /logs (init early in app_main)
+- `main/log_buffer.hpp/.cpp` — esp_log vprintf hook → 16 KB ring buffer; served at /logs AND rendered on the Debug tab (init early in app_main). **Single hook only** — do not re-add a second `esp_log_set_vprintf` (the old ui.cpp hook starved this one).
 - `main/storage.hpp/.cpp` — NVS: base position, WiFi creds, AP password (`ap_pw`), admin pw, service creds, toggles
 - `main/app_config.hpp` — compile-time constants: NTRIP hosts, AP SSID + default password, RTCM rates, survey params
 - `main/sd_manager.hpp/.cpp` — SD card via SDSPI; RINEX and raw data directories

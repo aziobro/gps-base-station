@@ -5,10 +5,13 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <string>
 #include <sys/stat.h>
 
+#include "app_config.hpp"
 #include "bsp/esp-bsp.h"
 #include "display.hpp"
+#include "log_buffer.hpp"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_hosted.h"
@@ -52,34 +55,15 @@ constexpr uint32_t kKeyCol    = 0x5a8098;
 constexpr uint32_t kTitleCol  = 0x3d6480;
 constexpr uint32_t kDimCol    = 0x3a5570;
 
-// ── Debug log ring buffer ─────────────────────────────────────────────────────
+// ── Debug log ──────────────────────────────────────────────────────────────────
+// Console capture is owned by the shared log_buffer module (installed once in
+// app_main, also served by the web /logs page). The Debug tab just renders the
+// tail of that single buffer — no separate hook here, which previously stole the
+// esp_log vprintf hook and starved the web log page.
 
-constexpr int kLogLines = 60;
-constexpr int kLogWidth = 100;
-static char     log_buf[kLogLines][kLogWidth];
-static int      log_head  = 0;
-static int      log_count = 0;
-static SemaphoreHandle_t log_sem = nullptr;
-
-static int ui_log_vprintf(const char *fmt, va_list args) {
-    va_list copy;
-    va_copy(copy, args);
-    char tmp[kLogWidth];
-    vsnprintf(tmp, sizeof(tmp), fmt, copy);
-    va_end(copy);
-    // strip trailing newline/CR
-    int len = static_cast<int>(strlen(tmp));
-    while (len > 0 && (tmp[len - 1] == '\n' || tmp[len - 1] == '\r')) {
-        tmp[--len] = '\0';
-    }
-    if (log_sem && xSemaphoreTake(log_sem, 0) == pdTRUE) {
-        strlcpy(log_buf[log_head], tmp, kLogWidth);
-        log_head = (log_head + 1) % kLogLines;
-        if (log_count < kLogLines) log_count++;
-        xSemaphoreGive(log_sem);
-    }
-    return vprintf(fmt, args);
-}
+// Maximum characters of log tail to render in the Debug label (keeps the LVGL
+// label light; the full history is available on the web /logs page).
+constexpr size_t kDebugTailChars = 4000;
 
 } // namespace
 
@@ -93,8 +77,6 @@ esp_err_t Ui::init(
     wifi_    = &wifi;
     storage_ = &storage;
 
-    log_sem = xSemaphoreCreateMutex();
-
     bsp_display_lock(0);
     build_screens(display.handle());
     lv_timer_create(refresh_timer_cb, 1000, this);
@@ -105,9 +87,6 @@ esp_err_t Ui::init(
     // Query the *running* C6 version off the LVGL task — it's an RPC over SDIO.
     xTaskCreate(c6_version_task, "c6_ver", 4096, this, 3, nullptr);
 
-    // Install log hook after display init so the build_screens path
-    // doesn't go through our hook (LVGL creates many objects, each may log).
-    esp_log_set_vprintf(ui_log_vprintf);
     ESP_LOGI(kTag, "UI ready");
     return ESP_OK;
 }
@@ -255,14 +234,18 @@ void Ui::fmt_ntrip_label(lv_obj_t *lbl, const NtripStatus &ns,
         lv_label_set_text(lbl, "Disabled");
         lv_obj_set_style_text_color(lbl, lv_color_hex(kDimCol), 0);
     } else if (ns.connected) {
-        char kb[20] = "";
-        fmt_bytes_str(kb, sizeof(kb), ns.bytes_sent);
-        snprintf(buf, buf_len, "Connected  %s", kb);
+        char up[16];
+        const unsigned s = ns.connected_sec;
+        if (s >= 3600)     snprintf(up, sizeof(up), "%uh%02um", s / 3600, (s % 3600) / 60);
+        else if (s >= 60)  snprintf(up, sizeof(up), "%um%02us", s / 60, s % 60);
+        else               snprintf(up, sizeof(up), "%us", s);
+        snprintf(buf, buf_len, "Connected  up %s", up);
         lv_label_set_text(lbl, buf);
         lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
     } else {
-        const char *msg = ns.message.empty() ? "Connecting\xe2\x80\xa6"
-                                              : ns.message.c_str();
+        const char *msg = !ns.message.empty() ? ns.message.c_str()
+                        : !ns.last_error.empty() ? ns.last_error.c_str()
+                        : "Connecting\xe2\x80\xa6";
         lv_label_set_text(lbl, msg);
         lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_RED), 0);
     }
@@ -386,7 +369,7 @@ void Ui::build_status_tab(lv_obj_t *parent) {
 
 static lv_obj_t *ntrip_detail_group(lv_obj_t *parent, const char *title,
     lv_obj_t **lbl_status, lv_obj_t **lbl_bytes, lv_obj_t **lbl_drop,
-    Ui *ui, int svc_idx) {
+    lv_obj_t **lbl_recon, Ui *ui, int svc_idx) {
     lv_obj_t *g = lv_obj_create(parent);
     lv_obj_remove_style_all(g);
     lv_obj_set_width(g, LV_PCT(100));
@@ -454,6 +437,7 @@ static lv_obj_t *ntrip_detail_group(lv_obj_t *parent, const char *title,
     make_r(lbl_status, "Status");
     make_r(lbl_bytes,  "Bytes sent");
     make_r(lbl_drop,   "Dropped");
+    make_r(lbl_recon,  "Reconnects");
     return g;
 }
 
@@ -476,13 +460,13 @@ void Ui::build_ntrip_tab(lv_obj_t *parent) {
 
     ntrip_detail_group(parent, "RTK2go",
         &lbl_d_rtk2go_, &lbl_d_rtk2go_bytes_, &lbl_d_rtk2go_drop_,
-        this, 0);
+        &lbl_d_rtk2go_recon_, this, 0);
     ntrip_detail_group(parent, "Onocoy",
         &lbl_d_onocoy_, &lbl_d_onocoy_bytes_, &lbl_d_onocoy_drop_,
-        this, 1);
+        &lbl_d_onocoy_recon_, this, 1);
     ntrip_detail_group(parent, "RTKdata",
         &lbl_d_rtkdata_, &lbl_d_rtkdata_bytes_, &lbl_d_rtkdata_drop_,
-        this, 2);
+        &lbl_d_rtkdata_recon_, this, 2);
 
     lv_obj_t *g_local = make_group(parent, "LOCAL CASTER :2101");
     make_row(g_local, &lbl_d_local_ntrip_, "Clients");
@@ -685,6 +669,34 @@ void Ui::build_wifi_modal() {
     lv_label_set_text(lbl_wifi_msg_, "");
     lv_obj_set_style_text_color(lbl_wifi_msg_, lv_color_hex(kDimCol), 0);
 
+    // ── Hotspot (this device's own AP) password ──
+    char ap_hdr[64];
+    snprintf(ap_hdr, sizeof(ap_hdr), "Hotspot \"%s\" password (WPA2):",
+             config::kAccessPointSsid);
+    lv_obj_t *lbl_ap = lv_label_create(cont);
+    lv_label_set_text(lbl_ap, ap_hdr);
+    lv_obj_set_style_text_color(lbl_ap, lv_color_hex(kKeyCol), 0);
+    lv_obj_set_style_pad_top(lbl_ap, 6, 0);
+
+    ta_ap_pass_ = lv_textarea_create(cont);
+    lv_textarea_set_one_line(ta_ap_pass_, true);
+    lv_textarea_set_password_mode(ta_ap_pass_, true);
+    lv_obj_set_width(ta_ap_pass_, LV_PCT(100));
+    lv_textarea_set_placeholder_text(ta_ap_pass_, "8-63 characters");
+    lv_obj_add_event_cb(ta_ap_pass_, on_ta_focused,   LV_EVENT_FOCUSED,   kb_wifi_);
+    lv_obj_add_event_cb(ta_ap_pass_, on_ta_defocused, LV_EVENT_DEFOCUSED, kb_wifi_);
+
+    lv_obj_t *ap_btn = lv_button_create(cont);
+    lv_obj_set_size(ap_btn, 220, 40);
+    lv_obj_t *ap_btn_lbl = lv_label_create(ap_btn);
+    lv_label_set_text(ap_btn_lbl, LV_SYMBOL_SAVE "  Save Hotspot Password");
+    lv_obj_center(ap_btn_lbl);
+    lv_obj_add_event_cb(ap_btn, on_ap_save, LV_EVENT_CLICKED, this);
+
+    lbl_ap_msg_ = lv_label_create(cont);
+    lv_label_set_text(lbl_ap_msg_, "");
+    lv_obj_set_style_text_color(lbl_ap_msg_, lv_color_hex(kDimCol), 0);
+
     // Scan results list
     lv_obj_t *scan_hdr = lv_label_create(cont);
     lv_label_set_text(scan_hdr, "Available networks:");
@@ -703,6 +715,10 @@ void Ui::open_wifi_modal() {
     lv_textarea_set_text(ta_wifi_ssid_, saved.ssid.c_str());
     lv_textarea_set_text(ta_wifi_pass_, saved.password.c_str());
     lv_label_set_text(lbl_wifi_msg_, "");
+    std::string ap_pw = storage_->ap_password();
+    if (ap_pw.empty()) ap_pw = config::kDefaultApPassword;
+    lv_textarea_set_text(ta_ap_pass_, ap_pw.c_str());
+    lv_label_set_text(lbl_ap_msg_, "");
     lv_obj_clear_flag(modal_wifi_, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1022,6 +1038,32 @@ void Ui::on_wifi_connect(lv_event_t *e) {
     // to the C6 coprocessor — must not run inside the LVGL task (display lock held)
     auto *arg = new WifiConnectArg{ui->wifi_, creds};
     xTaskCreate(wifi_connect_task, "wifi_conn", 4096, arg, 5, nullptr);
+}
+
+void Ui::ap_apply_task(void *arg) {
+    // esp_wifi_set_config(WIFI_IF_AP) goes over SDIO to the C6 — keep it off the
+    // LVGL task, which holds the display lock.
+    static_cast<WifiManager *>(arg)->apply_ap_settings();
+    vTaskDelete(nullptr);
+}
+
+void Ui::on_ap_save(lv_event_t *e) {
+    auto *ui = static_cast<Ui *>(lv_event_get_user_data(e));
+    const char *pw = lv_textarea_get_text(ui->ta_ap_pass_);
+    const size_t len = pw ? strlen(pw) : 0;
+    if (len < 8 || len > 63) {
+        lv_label_set_text(ui->lbl_ap_msg_, "Password must be 8-63 characters");
+        lv_obj_set_style_text_color(ui->lbl_ap_msg_,
+            lv_palette_main(LV_PALETTE_RED), 0);
+        return;
+    }
+    ui->storage_->save_ap_password(pw);
+    lv_label_set_text(ui->lbl_ap_msg_,
+        "Saved. Applying — reconnect AP clients with the new password.");
+    lv_obj_set_style_text_color(ui->lbl_ap_msg_,
+        lv_palette_main(LV_PALETTE_YELLOW), 0);
+    lv_textarea_set_password_mode(ui->ta_ap_pass_, true);
+    xTaskCreate(ap_apply_task, "ap_apply", 4096, ui->wifi_, 5, nullptr);
 }
 
 void Ui::on_wifi_list_click(lv_event_t *e) {
@@ -1384,22 +1426,35 @@ void Ui::refresh() {
 
     // ── NTRIP tab: detailed ───────────────────────────────────────────────────
     auto update_ntrip_detail = [&](const NtripStatus &ns,
-        lv_obj_t *lbl_st, lv_obj_t *lbl_bytes, lv_obj_t *lbl_drop) {
+        lv_obj_t *lbl_st, lv_obj_t *lbl_bytes, lv_obj_t *lbl_drop,
+        lv_obj_t *lbl_recon) {
         fmt_ntrip_label(lbl_st, ns, buf, sizeof(buf));
         if (ns.enabled) {
             char kb[20];
             fmt_bytes_str(kb, sizeof(kb), ns.bytes_sent);
-            lv_label_set_text(lbl_bytes, kb);
+            if (ns.ever_sent) {
+                snprintf(buf, sizeof(buf), "%s  (last %lus ago)", kb,
+                         (unsigned long)ns.last_send_age_sec);
+            } else {
+                snprintf(buf, sizeof(buf), "%s", kb);
+            }
+            lv_label_set_text(lbl_bytes, buf);
             snprintf(buf, sizeof(buf), "%lu", (unsigned long)ns.dropped_batches);
             lv_label_set_text(lbl_drop, buf);
+            snprintf(buf, sizeof(buf), "%lu", (unsigned long)ns.reconnects);
+            lv_label_set_text(lbl_recon, buf);
+            lv_obj_set_style_text_color(lbl_recon,
+                ns.reconnects > 0 ? lv_palette_main(LV_PALETTE_ORANGE)
+                                  : lv_color_hex(kDimCol), 0);
         } else {
             lv_label_set_text(lbl_bytes, "\xe2\x80\x94");
             lv_label_set_text(lbl_drop,  "\xe2\x80\x94");
+            lv_label_set_text(lbl_recon, "\xe2\x80\x94");
         }
     };
-    update_ntrip_detail(st.rtk2go,  lbl_d_rtk2go_,  lbl_d_rtk2go_bytes_,  lbl_d_rtk2go_drop_);
-    update_ntrip_detail(st.onocoy,  lbl_d_onocoy_,  lbl_d_onocoy_bytes_,  lbl_d_onocoy_drop_);
-    update_ntrip_detail(st.rtkdata, lbl_d_rtkdata_,  lbl_d_rtkdata_bytes_, lbl_d_rtkdata_drop_);
+    update_ntrip_detail(st.rtk2go,  lbl_d_rtk2go_,  lbl_d_rtk2go_bytes_,  lbl_d_rtk2go_drop_,  lbl_d_rtk2go_recon_);
+    update_ntrip_detail(st.onocoy,  lbl_d_onocoy_,  lbl_d_onocoy_bytes_,  lbl_d_onocoy_drop_,  lbl_d_onocoy_recon_);
+    update_ntrip_detail(st.rtkdata, lbl_d_rtkdata_,  lbl_d_rtkdata_bytes_, lbl_d_rtkdata_drop_, lbl_d_rtkdata_recon_);
 
     snprintf(buf, sizeof(buf), "%d client%s",
              st.local_clients, st.local_clients == 1 ? "" : "s");
@@ -1574,25 +1629,16 @@ void Ui::refresh() {
 }
 
 void Ui::refresh_debug_log() {
-    if (!lbl_debug_ || !log_sem) return;
+    if (!lbl_debug_) return;
 
-    static char log_text[kLogLines * kLogWidth + kLogLines]; // ~6 KB
-    log_text[0] = '\0';
-
-    if (xSemaphoreTake(log_sem, pdMS_TO_TICKS(10)) == pdTRUE) {
-        int start = (log_count == kLogLines) ? log_head : 0;
-        int write_pos = 0;
-        for (int i = 0; i < log_count; i++) {
-            int idx = (start + i) % kLogLines;
-            int n = snprintf(log_text + write_pos,
-                             sizeof(log_text) - write_pos - 1,
-                             "%s\n", log_buf[idx]);
-            if (n > 0) write_pos += n;
-        }
-        xSemaphoreGive(log_sem);
+    // Render the tail of the shared console buffer (full history is on /logs).
+    std::string logs = log_buffer::snapshot();
+    if (logs.size() > kDebugTailChars) {
+        const size_t cut = logs.size() - kDebugTailChars;
+        const size_t nl = logs.find('\n', cut);
+        logs.erase(0, nl == std::string::npos ? cut : nl + 1);
     }
-
-    lv_label_set_text(lbl_debug_, log_text);
+    lv_label_set_text(lbl_debug_, logs.empty() ? "(no log output yet)" : logs.c_str());
     // Scroll the tab page (not the inner container) to show the latest log lines.
     // Use get_scroll_y + get_scroll_bottom for a bounded, safe target value.
     if (tab_debug_) {

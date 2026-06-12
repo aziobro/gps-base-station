@@ -224,10 +224,10 @@ The onboard 720×720 touch LCD mirrors most of the web UI through a tabbed LVGL 
 | Tab | Contents |
 |-----|----------|
 | **Status** | Mode (SURVEY / BASE TX), RTCM throughput, satellite counts, fixed position, NTRIP caster status, and a **Start / Restart Survey** button |
-| **NTRIP** | Per-service status, bytes sent, and dropped batches; a global enable/disable switch; per-service **Config** buttons (mountpoint + password) |
+| **NTRIP** | Per-service status (with connection uptime), bytes sent + data freshness, dropped batches, and **reconnect count**; a global enable/disable switch; per-service **Config** buttons (mountpoint + password) |
 | **Position** | Fixed base position, survey quality (stability, sigma, blocks), and per-constellation satellite SNR detail |
-| **System** | WiFi state + **Configure WiFi** (scan, select, password), SD card stats + **Browse SD Card**, **RINEX collection** toggle, firmware versions, and **Update C6 Firmware** |
-| **Debug** | Scrolling on-device log output |
+| **System** | WiFi state + **Configure WiFi** (scan, select, station password, **and the hotspot/AP password**), SD card stats + **Browse SD Card**, **RINEX collection** toggle, firmware versions, and **Update C6 Firmware** |
+| **Debug** | Scrolling on-device console log (the same buffer served at `/logs`) |
 
 On-screen keyboards appear for all text entry (WiFi and NTRIP credentials). Changes made on the touchscreen and in the web UI share the same NVS storage.
 

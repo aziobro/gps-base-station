@@ -53,12 +53,15 @@ private:
     lv_obj_t *lbl_d_rtk2go_        = nullptr;
     lv_obj_t *lbl_d_rtk2go_bytes_  = nullptr;
     lv_obj_t *lbl_d_rtk2go_drop_   = nullptr;
+    lv_obj_t *lbl_d_rtk2go_recon_  = nullptr;
     lv_obj_t *lbl_d_onocoy_        = nullptr;
     lv_obj_t *lbl_d_onocoy_bytes_  = nullptr;
     lv_obj_t *lbl_d_onocoy_drop_   = nullptr;
+    lv_obj_t *lbl_d_onocoy_recon_  = nullptr;
     lv_obj_t *lbl_d_rtkdata_       = nullptr;
     lv_obj_t *lbl_d_rtkdata_bytes_ = nullptr;
     lv_obj_t *lbl_d_rtkdata_drop_  = nullptr;
+    lv_obj_t *lbl_d_rtkdata_recon_ = nullptr;
     lv_obj_t *lbl_d_local_ntrip_   = nullptr;
 
     // ── Position tab ──────────────────────────────────────────────────────────
@@ -110,6 +113,8 @@ private:
     lv_obj_t *list_wifi_scan_   = nullptr;
     lv_obj_t *lbl_wifi_msg_     = nullptr;
     lv_obj_t *btn_wifi_scan_    = nullptr;
+    lv_obj_t *ta_ap_pass_       = nullptr;  // SoftAP (hotspot) password field
+    lv_obj_t *lbl_ap_msg_       = nullptr;
     std::atomic<bool> scan_running_{false};
 
     // ── NTRIP config modal (shared, repopulated per service) ──────────────────
@@ -176,6 +181,8 @@ private:
     static void on_wifi_scan(lv_event_t *e);
     static void on_wifi_connect(lv_event_t *e);
     static void on_wifi_list_click(lv_event_t *e);
+    static void on_ap_save(lv_event_t *e);
+    static void ap_apply_task(void *arg);
     static void wifi_scan_task(void *arg);
 
     // ── NTRIP modal callbacks ─────────────────────────────────────────────────
