@@ -1589,9 +1589,9 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
     httpd_resp_set_hdr(request, "Content-Disposition",
                        "attachment; filename=\"merged.rnx\"");
 
-    // 4 KB > TCP MSS (1460 B): Nagle's algorithm sends immediately rather
-    // than waiting 40 ms for a delayed-ACK of the preceding chunk header.
-    char buf[4096];
+    // 3 KB > TCP MSS (1460 B) so Nagle sends immediately, and safely below
+    // MBEDTLS_SSL_OUT_CONTENT_LEN (4096 B) so plaintext + TLS overhead fits.
+    char buf[3072];
     bool header_sent = false;
 
     for (const std::string &path : paths) {
