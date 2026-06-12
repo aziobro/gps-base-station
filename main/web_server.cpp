@@ -1256,6 +1256,7 @@ esp_err_t AdminWebServer::files_page_handler(httpd_req_t *request) {
         "<button id='merge-btn' onclick='mergeSelected()' style='display:none;padding:3px 10px;background:#1a1a1a;color:#08f;border:1px solid #08f;cursor:pointer;white-space:nowrap'>&#8659; Merge &amp; Download</button>"
         "<button id='mkdir-btn' onclick='mkdirPrompt()' style='padding:3px 10px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer;white-space:nowrap'>+ New Folder</button>"
         "</div>"
+        "<div id='merge-status' style='display:none;padding:6px 0;font-size:0.85em'></div>"
         "<div style='overflow-x:auto'>"
         "<table><thead><tr>"
         "<th style='text-align:left;padding:4px 8px;width:18px' id='sel-th'></th>"
@@ -1294,6 +1295,8 @@ function loadDir(path){
   tb.innerHTML='<tr><td colspan="4" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
   var mergeBtn=document.getElementById('merge-btn');
   if(mergeBtn)mergeBtn.style.display='none';
+  var mergeStatus=document.getElementById('merge-status');
+  if(mergeStatus)mergeStatus.style.display='none';
   fetch('/files/list?path='+encodeURIComponent(path))
     .then(function(r){return r.json();}).then(function(entries){
       fileEntries=entries.sort(function(a,b){
@@ -1336,10 +1339,38 @@ function mergeSelected(){
   var cbs=document.querySelectorAll('.rnx-cb:checked');
   if(cbs.length<2){alert('Select at least 2 RINEX files to merge.');return;}
   var files=Array.from(cbs).map(function(cb){return cb.getAttribute('data-path');});
-  fetch('/files/rinex_merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:files})})
-    .then(function(r){if(!r.ok)throw new Error('Merge failed');return r.blob();})
-    .then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='merged.rnx';a.click();URL.revokeObjectURL(a.href);})
-    .catch(function(e){alert(e.message||'Merge failed');});
+  var btn=document.getElementById('merge-btn');
+  var statusEl=document.getElementById('merge-status');
+  btn.disabled=true;
+  btn.textContent='Merging…';
+  statusEl.style.display='';
+  statusEl.style.color='#888';
+  statusEl.textContent='Merging '+cbs.length+' file'+(cbs.length===1?'':'s')+'… do not navigate away.';
+  var xhr=new XMLHttpRequest();
+  xhr.open('POST','/files/rinex_merge');
+  xhr.setRequestHeader('Content-Type','application/json');
+  xhr.responseType='blob';
+  xhr.onprogress=function(e){
+    statusEl.textContent='Downloading… '+(e.loaded/1024).toFixed(0)+' KB received — do not navigate away.';
+  };
+  xhr.onload=function(){
+    if(xhr.status===200){
+      var blob=xhr.response;
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='merged.rnx';a.click();URL.revokeObjectURL(a.href);
+      statusEl.style.color='#0f0';
+      statusEl.textContent='✓ Done — '+(blob.size/1024).toFixed(0)+' KB merged and downloaded.';
+    }else{
+      statusEl.style.color='#f44';
+      statusEl.textContent='✗ Merge failed (HTTP '+xhr.status+').';
+    }
+    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
+  };
+  xhr.onerror=function(){
+    statusEl.style.color='#f44';
+    statusEl.textContent='✗ Merge failed — check connection.';
+    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
+  };
+  xhr.send(JSON.stringify({files:files}));
 }
 function renameEntry(i){
   var e=fileEntries[i];
