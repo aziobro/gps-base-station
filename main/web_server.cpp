@@ -1595,18 +1595,20 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
             }
             header_sent = true;
         } else {
-            // Skip lines until END OF HEADER, then stream the rest.
+            // Skip lines until END OF HEADER, then stream the rest in
+            // bulk blocks — one chunk per fread rather than per line.
             bool past_header = false;
-            while (fgets(buf, sizeof(buf), f)) {
-                if (!past_header) {
-                    if (strstr(buf, "END OF HEADER")) past_header = true;
-                    continue;
-                }
-                const size_t n = strlen(buf);
-                if (httpd_resp_send_chunk(
-                        request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
-                    fclose(f);
-                    goto done;
+            while (!past_header && fgets(buf, sizeof(buf), f)) {
+                if (strstr(buf, "END OF HEADER")) past_header = true;
+            }
+            if (past_header) {
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+                    if (httpd_resp_send_chunk(
+                            request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
+                        fclose(f);
+                        goto done;
+                    }
                 }
             }
         }
