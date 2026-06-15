@@ -64,9 +64,14 @@ void write_obs(FILE *f, bool valid, double value) {
 
 // ---------------------------------------------------------------------------
 
-void RinexLogger::start(double lat, double lon, double height) {
+void RinexLogger::start(double lat, double lon, double height,
+                        const std::string &ant_model,
+                        const std::string &ant_radome, double ant_delta_h) {
     if (active_) return;
     lat_ = lat; lon_ = lon; height_ = height;
+    ant_model_   = ant_model.empty()  ? "HXCGPS500" : ant_model;
+    ant_radome_  = ant_radome.empty() ? "NONE"      : ant_radome;
+    ant_delta_h_ = ant_delta_h;
     geodetic_to_ecef(lat, lon, height, ecef_x_, ecef_y_, ecef_z_);
     in_msg_  = false;
     msg_len_ = 0;
@@ -128,16 +133,51 @@ void RinexLogger::feed(const uint8_t *data, size_t len) {
 
 // ---------------------------------------------------------------------------
 
-// Return true if this signal type is the preferred secondary (L2/E5a/B3I).
-bool RinexLogger::prefers_sig2(uint8_t sys, uint8_t sig) {
+// Map a UM980 channel-tracking-status (system, signal-type) to a RINEX
+// frequency band: 0 = L1/E1/B1I, 1 = L2/E5a/B3I, 2 = L5 (GPS), or -1 to ignore.
+// *pref is a within-band preference rank (higher wins) so that when one
+// satellite reports several signals on the same band we keep a single,
+// consistently-labelled measurement that matches the header's observation code.
+//
+// IMPORTANT: classification is by *signal type*, never by the old "primary"
+// bit — that bit lived inside the 5-bit signal-type field (bits 21-25), so it
+// scrambled L1/L2/L5 across columns and made OPUS reject the data as noisy.
+namespace {
+int signal_band(uint8_t sys, uint8_t sig, int *pref) {
+    *pref = 0;
     switch (sys) {
-        case 0: return sig == 5 || sig == 9;  // GPS L2P or L2C
-        case 1: return sig == 5;              // GLO L2CA
-        case 3: return sig == 11;             // GAL E5aQ
-        case 4: return sig == 7;              // BDS B3I
-        default: return false;
+        case 0:  // GPS: L1 C/A -> b0 (C1C/L1C), L2 -> b1 (C2W/L2W), L5 -> b2
+            switch (sig) {
+                case 0:  *pref = 10; return 0;  // L1 C/A
+                case 16: *pref = 5;  return 0;  // L1C (pilot), fallback
+                case 5:  *pref = 10; return 1;  // L2 P(Y)  -> matches L2W label
+                case 9:  *pref = 6;  return 1;  // L2C
+                case 17: *pref = 5;  return 1;  // L2C(M)
+                case 14: *pref = 10; return 2;  // L5 Q
+                default: return -1;
+            }
+        case 1:  // GLONASS: L1 C/A -> b0, L2 C/A -> b1
+            switch (sig) {
+                case 0: *pref = 10; return 0;   // L1 C/A
+                case 5: *pref = 10; return 1;   // L2 C/A
+                default: return -1;
+            }
+        case 3:  // Galileo: E1 -> b0 (C1C/L1C), E5a -> b1 (C5Q/L5Q)
+            switch (sig) {
+                case 2:  *pref = 10; return 0;  // E1
+                case 12: *pref = 10; return 1;  // E5a
+                default: return -1;             // E5b (17) etc. not carried
+            }
+        case 4:  // BeiDou: B1I -> b0 (C2I/L2I), B3I -> b1 (C6I/L6I)
+            switch (sig) {
+                case 0:  *pref = 10; return 0;  // B1I
+                case 21: *pref = 10; return 1;  // B3I
+                default: return -1;             // B1C(8), B2a(12), B2b(13) not carried
+            }
+        default: return -1;
     }
 }
+}  // namespace
 
 void RinexLogger::process_message() {
     // Locate the ';' that separates header fields from the observation body.
@@ -226,7 +266,6 @@ void RinexLogger::process_message() {
         // tracking status; signal type in bits 21-25 (5 bits).
         const uint8_t  sys      = (tstat >> 16) & 0x7;
         const uint8_t  sig      = (tstat >> 21) & 0x1F;
-        const bool     is_prim  = (tstat >> 23) & 0x1;
 
         // Validate the constellation + PRN before storing. Anything that can't
         // map to a legal RINEX id (unsupported system, GPS>32, GLONASS>24, ...)
@@ -238,13 +277,22 @@ void RinexLogger::process_message() {
             continue;
         }
 
+        // Classify the signal into its RINEX frequency band by signal type.
+        int pref = 0;
+        const int band = signal_band(sys, sig, &pref);
+        if (band < 0) continue;  // signal we don't carry (e.g. extra L-band)
+
         // Find or create the entry for this satellite.
         SatObs *sat = nullptr;
         for (auto &s : sats) {
             if (s.prn == prn && s.system == sys) { sat = &s; break; }
         }
         if (!sat) {
-            sats.push_back({prn, sys, glo_freq, {}, {}});
+            SatObs ns;
+            ns.prn      = prn;
+            ns.system   = sys;
+            ns.glo_freq = glo_freq;
+            sats.push_back(ns);
             sat = &sats.back();
         }
         sat->glo_freq = glo_freq;
@@ -259,12 +307,11 @@ void RinexLogger::process_message() {
         obs.cn0           = cn0;
         obs.valid         = true;
 
-        if (is_prim) {
-            if (!sat->sig1.valid) sat->sig1 = obs;
-        } else {
-            if (!sat->sig2.valid || prefers_sig2(sys, sig)) {
-                sat->sig2 = obs;
-            }
+        // Keep the highest-preference signal for this band so the column always
+        // matches the header's declared observation code.
+        if (pref > sat->pref[band]) {
+            sat->sig[band]  = obs;
+            sat->pref[band] = (int8_t)pref;
         }
     }
 
@@ -373,23 +420,33 @@ void RinexLogger::write_header(int gps_week, double tow) {
     fprintf(file_, "%-20s%-40sOBSERVER / AGENCY\n", "UNKNOWN", "UNKNOWN");
     fprintf(file_, "%-20s%-20s%-20sREC # / TYPE / VERS\n",
             "0000", "UM980", "UNICORE");
-    fprintf(file_, "%-20s%-40sANT # / TYPE     \n", "0000", "UNKNOWN");
+    // ANT # / TYPE: antenna number (A20, cols 1-20) + antenna type (A20, cols
+    // 21-40: 16-char model + 4-char radome) + blank (cols 41-60) + label (cols
+    // 61-80). The trailing %-20s of "" fills cols 41-60 so the label lands in
+    // its required columns — PPP services (OPUS, CSRS-PPP) read the antenna name
+    // from cols 21-40 only when the label is correctly at 61-80.
+    char anttype[21];
+    snprintf(anttype, sizeof(anttype), "%-16.16s%-4.4s",
+             ant_model_.c_str(), ant_radome_.c_str());
+    fprintf(file_, "%-20s%-20s%-20sANT # / TYPE     \n", "0000", anttype, "");
     fprintf(file_, "%14.4f%14.4f%14.4f                  APPROX POSITION XYZ\n",
             ecef_x_, ecef_y_, ecef_z_);
     // 3×F14.4 (=42) + 18 blanks = 60 content columns; label must start at col 61.
     fprintf(file_, "%14.4f%14.4f%14.4f                  ANTENNA: DELTA H/E/N\n",
-            0.0, 0.0, 0.0);
+            ant_delta_h_, 0.0, 0.0);
 
     // SYS / # / OBS TYPES — emit a line only for systems actually present in
-    // this file (determined from the first epoch). 8 obs per system: C L D S
-    // for two frequency bands.  ("%c    8 %s" puts the system letter in col 1,
-    // the obs count in cols 4-6, and the codes from col 8 per RINEX 3.)
+    // this file (determined from the first epoch). Observation count is per
+    // system (GPS = 12 for L1/L2/L5; others = 8). Format "%c  %3d %s" puts the
+    // system letter in col 1, the count right-justified in cols 4-6, and the
+    // codes from col 8 per RINEX 3 (max 13 codes per line — 12 fits).
     int nsys = 0;
     const rinex::SystemDef *defs = rinex::systems(&nsys);
     for (int i = 0; i < nsys; ++i) {
         if (!(present_mask_ & (1u << defs[i].sys))) continue;
-        char content[64];
-        snprintf(content, sizeof(content), "%c    8 %s", defs[i].code, defs[i].obs);
+        char content[80];
+        snprintf(content, sizeof(content), "%c  %3d %s",
+                 defs[i].code, defs[i].nobs, defs[i].obs);
         fprintf(file_, "%-60sSYS / # / OBS TYPES\n", content);
     }
 
@@ -442,15 +499,18 @@ void RinexLogger::write_epoch(int gps_week, double tow,
         // Satellite identifier with its correct constellation prefix + PRN.
         fprintf(file_, "%s", es.id);
 
-        // 8 observation values in declared order: C1, L1, D1, S1, C2, L2, D2, S2
-        write_obs(file_, sat->sig1.valid, sat->sig1.pseudorange);
-        write_obs(file_, sat->sig1.valid, sat->sig1.carrier_phase);
-        write_obs(file_, sat->sig1.valid, (double)sat->sig1.doppler);
-        write_obs(file_, sat->sig1.valid, (double)sat->sig1.cn0);
-        write_obs(file_, sat->sig2.valid, sat->sig2.pseudorange);
-        write_obs(file_, sat->sig2.valid, sat->sig2.carrier_phase);
-        write_obs(file_, sat->sig2.valid, (double)sat->sig2.doppler);
-        write_obs(file_, sat->sig2.valid, (double)sat->sig2.cn0);
+        // One C/L/D/S quartet per frequency band the system declares, in header
+        // order (GPS: L1, L2, L5; others: band0, band1). Blank quartets are
+        // emitted for bands this satellite did not track this epoch.
+        const rinex::SystemDef *def = rinex::find_system(sat->system);
+        const int bands = rinex::system_bands(def);
+        for (int b = 0; b < bands && b < kBands; ++b) {
+            const SigObs &g = sat->sig[b];
+            write_obs(file_, g.valid, g.pseudorange);
+            write_obs(file_, g.valid, g.carrier_phase);
+            write_obs(file_, g.valid, (double)g.doppler);
+            write_obs(file_, g.valid, (double)g.cn0);
+        }
         fprintf(file_, "\n");
     }
 

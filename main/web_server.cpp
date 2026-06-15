@@ -256,6 +256,7 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/survey", HTTP_POST, survey_handler, this},
         {"/config/wifi", HTTP_POST, wifi_handler, this},
         {"/config/ap", HTTP_POST, ap_password_handler, this},
+        {"/config/antenna", HTTP_POST, antenna_handler, this},
         {"/logs", HTTP_GET, logs_page_handler, this},
         {"/logs/data", HTTP_GET, logs_data_handler, this},
         {"/ca.crt", HTTP_GET, ca_certificate_handler, this},
@@ -624,6 +625,19 @@ esp_err_t AdminWebServer::config_get_handler(httpd_req_t *request) {
         "<p><input name='hgt' placeholder='Ellipsoidal height (m)' value='" +
         std::string(height) + "'></p>"
         "<button>Save Position</button></form>"
+        "<h2>Antenna (RINEX)</h2>"
+        "<p class='dim'>Written into the RINEX header so OPUS / CSRS-PPP apply "
+        "phase-centre corrections automatically. Model must match the IGS/NGS "
+        "antenna name. Height is the ARP delta-H (0 = solve for the ARP).</p>"
+        "<form method='post' action='/config/antenna'>"
+        "<p><input name='ant_model' placeholder='Antenna model (e.g. HXCGPS500)' value='" +
+        html_escape(server->storage_->antenna_model()) + "'></p>"
+        "<p><input name='ant_radome' placeholder='Radome (e.g. NONE)' value='" +
+        html_escape(server->storage_->antenna_radome()) + "'></p>"
+        "<p><input name='ant_h' placeholder='Antenna height / ARP delta-H (m)' value='" +
+        [&]() { char b[32]; snprintf(b, sizeof(b), "%.4f", server->storage_->antenna_height()); return std::string(b); }() +
+        "'></p>"
+        "<button>Save Antenna</button></form>"
         "<h2>Survey</h2><form method='post' action='/survey'>"
         "<button>Start New Survey</button></form>"
         "<h2>WiFi</h2><form method='post' action='/config/wifi'>"
@@ -1067,6 +1081,30 @@ esp_err_t AdminWebServer::ap_password_handler(httpd_req_t *request) {
     // Apply live so the change takes effect without a reboot. Currently joined
     // hotspot clients will be dropped and must reconnect with the new password.
     server->wifi_->apply_ap_settings();
+    httpd_resp_set_status(request, "303 See Other");
+    httpd_resp_set_hdr(request, "Location", "/config");
+    return httpd_resp_send(request, nullptr, 0);
+}
+
+esp_err_t AdminWebServer::antenna_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+    const std::string body = read_body(request, 512);
+    std::string model  = form_value(body, "ant_model");
+    std::string radome = form_value(body, "ant_radome");
+    const std::string height_str = form_value(body, "ant_h");
+    if (model.empty())  model  = "HXCGPS500";
+    if (radome.empty()) radome = "NONE";
+    if (model.size() > 16 || radome.size() > 4) {
+        return httpd_resp_send_err(
+            request, HTTPD_400_BAD_REQUEST,
+            "Antenna model max 16 chars, radome max 4");
+    }
+    const double height = height_str.empty() ? 0.0 : atof(height_str.c_str());
+    ESP_RETURN_ON_ERROR(
+        server->storage_->save_antenna(model, radome, height),
+        kTag, "Antenna save failed");
+    // Takes effect on the next RINEX file (open_file writes the header).
     httpd_resp_set_status(request, "303 See Other");
     httpd_resp_set_hdr(request, "Location", "/config");
     return httpd_resp_send(request, nullptr, 0);

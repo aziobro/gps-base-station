@@ -290,19 +290,33 @@ The base station can record raw GNSS observations in **RINEX 3.03** format for p
 
 ### How it works
 
-1. Click **Start** next to the *RINEX collection* row on the status page
-2. COM3 switches from RTCM binary output to ASCII `RANGEA` (raw observations) at 30-second intervals — RTCM push to RTK2go, Onocoy, and RTKdata is automatically suspended while collecting
-3. One-hour files are written to `/sdcard/rawdata/` named `BASE_YYYYMMDD_HHMMSS.rnx`
-4. Click **Stop** to close the current file and restore full RTCM output
-5. Navigate to **SD card files → rawdata**, select two or more `.rnx` files (up to 15+ supported), and click **Merge & Download** — a progress indicator shows elapsed time and bytes received; do not navigate away until the download completes
+1. (Once) set your antenna on the **/config** page under **Antenna (RINEX)** — model (e.g. `HXCGPS500`), radome (e.g. `NONE`), and height. The model must match the IGS/NGS antenna-calibration name so PPP services apply phase-centre corrections automatically.
+2. Click **Start** next to the *RINEX collection* row on the status page
+3. COM3 switches from RTCM binary output to ASCII `RANGEA` (raw observations) at 30-second intervals — RTCM push to RTK2go, Onocoy, and RTKdata is automatically suspended while collecting
+4. One-hour files are written to `/sdcard/rawdata/` named `BASE_YYYYMMDD_HHMMSS.rnx`
+5. Click **Stop** to close the current file and restore full RTCM output
+6. Navigate to **SD card files → rawdata**, select two or more `.rnx` files (up to 15+ supported), and click **Merge & Download** — a progress indicator shows elapsed time and bytes received; do not navigate away until the download completes
 
-### Uploading to OPUS
+### Observation content
+
+Each satellite is written with its real per-frequency signals, classified by the UM980 signal type (never a guessed "primary" flag):
+
+| System | Bands written | RINEX codes |
+|--------|---------------|-------------|
+| GPS | L1 C/A, L2C, **L5** | `C1C L1C` · `C2W L2W` · `C5Q L5Q` |
+| GLONASS | L1 C/A, L2 C/A | `C1C L1C` · `C2C L2C` |
+| Galileo | E1, E5a | `C1C L1C` · `C5Q L5Q` |
+| BeiDou | B1I, B3I | `C2I L2I` · `C6I L6I` |
+
+Correct L1/L2 assignment is essential: an early firmware bug scrambled the frequencies (assigning by a status bit that actually lived inside the signal-type field), which made OPUS reject files as "noisy / kinematic." With the signals correctly classified, OPUS resolves ~90% of ambiguities.
+
+### Uploading to OPUS / CSRS-PPP
 
 OPUS accepts RINEX 2.x and 3.x observation files. For best results:
 
 - Collect at least **4 hours** of data (2 hours minimum for OPUS Static)
-- The GPS L1 + L2 dual-frequency observations written by this firmware are compatible with both OPUS Static and OPUS Rapid Static
-- The APPROX POSITION XYZ in the file header is set from the current survey-in position; OPUS computes the precise position independently
+- GPS L1/L2 dual-frequency (plus L5) is compatible with OPUS Static and OPUS Rapid Static, and with NRCan CSRS-PPP
+- The `ANT # / TYPE` and `APPROX POSITION XYZ` are written into the header, so the antenna is recognized automatically (no manual selection) and the position is a starting estimate only — the service computes the precise position independently
 
 Once OPUS returns a result, enter the precise latitude, longitude, and ellipsoidal height on the **/config** page under **Manual Position** and click **Save Position** — the base will immediately reconfigure to broadcast corrections from that surveyed location.
 

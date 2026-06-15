@@ -10,3 +10,6 @@
 
 ## Networking & Web
 - [project_ntrip](project_ntrip.md) — NTRIP push flow, reconnect-storm root cause + fix, diagnostics
+
+## RINEX / Post-processing
+- [project_rinex](project_rinex.md) — signal→band classification, Unicore UM980 signal codes, antenna metadata, OPUS/CSRS-PPP

@@ -21,14 +21,15 @@ metadata:
 - `main/wifi_manager.hpp/.cpp` — esp_hosted + WiFi station/AP fallback; AP is WPA2 (password in NVS, default `config::kDefaultApPassword`), `apply_ap_settings()` reconfigures live
 - `main/web_server.hpp/.cpp` — HTTPS admin panel (port 443): status, /config (NTRIP+WiFi+AP password), /logs console viewer, file browser, OTA
 - `main/log_buffer.hpp/.cpp` — esp_log vprintf hook → 16 KB ring buffer; served at /logs AND rendered on the Debug tab (init early in app_main). **Single hook only** — do not re-add a second `esp_log_set_vprintf` (the old ui.cpp hook starved this one).
-- `main/storage.hpp/.cpp` — NVS: base position, WiFi creds, AP password (`ap_pw`), admin pw, service creds, toggles
+- `main/storage.hpp/.cpp` — NVS: base position, WiFi creds, AP password (`ap_pw`), antenna (`ant_model`/`ant_radome`/`ant_h`), admin pw, service creds, toggles
 - `main/app_config.hpp` — compile-time constants: NTRIP hosts, AP SSID + default password, RTCM rates, survey params
 - `main/sd_manager.hpp/.cpp` — SD card via SDSPI; RINEX and raw data directories
 - `main/ntrip_push.hpp/.cpp` — pushes RTCM3 to RTK2go, Onocoy, RTKdata
 - `main/local_caster.hpp/.cpp` — local NTRIP caster on port 2101 (up to 4 clients)
 - `main/survey.hpp/.cpp` — UM980 CONFIG BASE TIME survey parser
 - `main/um980.hpp/.cpp` — UM980 UART command/response driver
-- `main/rinex_logger.hpp/.cpp` — RINEX 3.03 raw observation logging to SD
+- `main/rinex_logger.hpp/.cpp` — RINEX 3.03 raw observation logging to SD. Classifies signals by type → band (GPS L1/L2/L5, others 2-band), configurable antenna header. See [[project_rinex]]
+- `main/rinex_satid.h` — RINEX sat-id + SystemDef (obs codes, nobs/bands); shared with host unit test
 
 ## NTRIP mountpoints
 - RTK2go: register at rtk2go.com

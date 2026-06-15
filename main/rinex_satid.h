@@ -33,22 +33,28 @@ struct SystemDef {
     int         max_prn;    // inclusive upper bound for a legal PRN
     int         offset;     // subtract from the raw PRN when raw >= threshold
     int         threshold;  // raw-PRN value at/above which the offset applies
-    const char *obs;        // 8 space-separated RINEX 3 observation codes
+    const char *obs;        // space-separated RINEX 3 observation codes (4 per band)
+    int         nobs;       // number of observation codes (= 4 * frequency bands)
 };
 
-// Header emission order. SBAS is intentionally omitted: OPUS ignores it and it
-// would need a 4-observation row, breaking the uniform 8-obs layout.
+// Header emission order. SBAS is intentionally omitted: OPUS ignores it.
+// Each constellation lists 4 observation codes (C/L/D/S) per frequency band.
+// GPS carries three bands (L1 C/A, L2 P(Y), L5) so OPUS gets a clean dual-
+// frequency pair plus L5; the others carry their two primary bands.
 inline const SystemDef *systems(int *count) {
     static const SystemDef kSystems[] = {
-        {kSysGps,  'G', 32,   0, 100000, "C1C L1C D1C S1C C2W L2W D2W S2W"},
-        {kSysGlo,  'R', 24,  37,     38, "C1C L1C D1C S1C C2C L2C D2C S2C"},
-        {kSysGal,  'E', 36,   0, 100000, "C1C L1C D1C S1C C5Q L5Q D5Q S5Q"},
-        {kSysBds,  'C', 63, 140,    141, "C2I L2I D2I S2I C6I L6I D6I S6I"},
-        {kSysQzss, 'J', 10, 192,    193, "C1C L1C D1C S1C C2L L2L D2L S2L"},
+        {kSysGps,  'G', 32,   0, 100000, "C1C L1C D1C S1C C2W L2W D2W S2W C5Q L5Q D5Q S5Q", 12},
+        {kSysGlo,  'R', 24,  37,     38, "C1C L1C D1C S1C C2C L2C D2C S2C",  8},
+        {kSysGal,  'E', 36,   0, 100000, "C1C L1C D1C S1C C5Q L5Q D5Q S5Q",  8},
+        {kSysBds,  'C', 63, 140,    141, "C2I L2I D2I S2I C6I L6I D6I S6I",  8},
+        {kSysQzss, 'J', 10, 192,    193, "C1C L1C D1C S1C C2L L2L D2L S2L",  8},
     };
     if (count) *count = (int)(sizeof(kSystems) / sizeof(kSystems[0]));
     return kSystems;
 }
+
+// Number of frequency bands a system emits (4 observation codes per band).
+inline int system_bands(const SystemDef *d) { return d ? d->nobs / 4 : 0; }
 
 inline const SystemDef *find_system(int sys) {
     int n = 0;

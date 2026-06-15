@@ -124,6 +124,28 @@ esp_err_t Storage::save_ap_password(const std::string &password) {
     return commit();
 }
 
+std::string Storage::antenna_model() const {
+    const std::string m = get_string("ant_model");
+    return m.empty() ? "HXCGPS500" : m;
+}
+
+std::string Storage::antenna_radome() const {
+    const std::string r = get_string("ant_radome");
+    return r.empty() ? "NONE" : r;
+}
+
+double Storage::antenna_height() const {
+    return get_double("ant_h", 0.0);
+}
+
+esp_err_t Storage::save_antenna(
+    const std::string &model, const std::string &radome, double height) {
+    ESP_RETURN_ON_ERROR(set_string("ant_model", model), kTag, "Antenna model save failed");
+    ESP_RETURN_ON_ERROR(set_string("ant_radome", radome), kTag, "Antenna radome save failed");
+    ESP_RETURN_ON_ERROR(set_double("ant_h", height), kTag, "Antenna height save failed");
+    return commit();
+}
+
 bool Storage::ntrip_streams_enabled(bool default_value) const {
     return get_bool("ntrip_on", default_value);
 }

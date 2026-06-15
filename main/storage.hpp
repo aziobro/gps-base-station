@@ -56,6 +56,15 @@ public:
     std::string ap_password() const;
     esp_err_t save_ap_password(const std::string &password);
 
+    // RINEX antenna metadata written into the observation file header so PPP
+    // services (OPUS, CSRS-PPP) apply phase-centre corrections automatically.
+    // Defaults: model "HXCGPS500", radome "NONE", height 0.0 m (solve for ARP).
+    std::string antenna_model() const;
+    std::string antenna_radome() const;
+    double      antenna_height() const;  // ARP DELTA H, metres
+    esp_err_t   save_antenna(const std::string &model,
+                             const std::string &radome, double height);
+
     // Global NTRIP push on/off (survives power cycles). Defaults to enabled.
     bool ntrip_streams_enabled(bool default_value = true) const;
     esp_err_t set_ntrip_streams_enabled(bool enabled);

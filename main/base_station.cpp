@@ -286,7 +286,9 @@ void BaseStation::enter_raw_collection() {
     uart_flush_input(data_uart_);
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_raw_output());
     const BasePosition pos = storage_.load_position();
-    rinex_logger_.start(pos.lat, pos.lon, pos.height);
+    rinex_logger_.start(pos.lat, pos.lon, pos.height,
+                        storage_.antenna_model(), storage_.antenna_radome(),
+                        storage_.antenna_height());
     ESP_LOGI(kTag, "Raw collection mode entered");
 }
 

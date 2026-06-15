@@ -20,7 +20,13 @@ public:
     };
 
     // Start logging.  lat/lon in decimal degrees, height in metres (WGS-84).
-    void start(double lat, double lon, double height);
+    // Antenna metadata is written into the RINEX header so PPP services apply
+    // phase-centre corrections (model = IGS/NGS antenna name, radome e.g.
+    // "NONE", delta_h = ARP height in metres).
+    void start(double lat, double lon, double height,
+               const std::string &ant_model = "HXCGPS500",
+               const std::string &ant_radome = "NONE",
+               double ant_delta_h = 0.0);
     void stop();
 
     bool   is_active() const { return active_; }
@@ -38,12 +44,16 @@ private:
         bool   valid         = false;
     };
 
+    // Frequency bands per satellite, in RINEX header order:
+    //   band 0 = L1 / E1 / B1I, band 1 = L2 / E5a / B3I, band 2 = L5 (GPS only).
+    static constexpr int kBands = 3;
+
     struct SatObs {
         uint16_t prn      = 0;
         uint8_t  system   = 0;  // 0=GPS 1=GLO 3=GAL 4=BDS 5=QZSS
         int8_t   glo_freq = 0;  // GLONASS frequency channel (-7..+6)
-        SigObs   sig1;          // primary (L1 / E1 / B1I)
-        SigObs   sig2;          // secondary (L2 / E5a / B3I)
+        SigObs   sig[kBands];   // one observation set per frequency band
+        int8_t   pref[kBands] = {-1, -1, -1};  // stored signal's within-band rank
     };
 
     void process_message();
@@ -53,10 +63,13 @@ private:
     void write_header(int gps_week, double tow);
     void write_epoch(int gps_week, double tow, std::vector<SatObs> &sats);
 
-    static bool prefers_sig2(uint8_t sys, uint8_t sig);
-
     double ecef_x_ = 0, ecef_y_ = 0, ecef_z_ = 0;
     double lat_ = 0, lon_ = 0, height_ = 0;
+
+    // Antenna metadata for the RINEX header (see start()).
+    std::string ant_model_  = "HXCGPS500";
+    std::string ant_radome_ = "NONE";
+    double      ant_delta_h_ = 0.0;
 
     std::atomic<bool> active_{false};
     FILE       *file_         = nullptr;
