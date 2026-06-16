@@ -52,7 +52,8 @@ public:
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;
-    static constexpr uint32_t kRetryIntervalMs = 10000;  // station re-association retry
+    static constexpr uint32_t kRetryIntervalMs = 10000;   // station re-association retry
+    static constexpr int64_t  kApFallbackMs    = 120000;  // raise SoftAP after 2 min offline
 
     Storage *storage_ = nullptr;
     EventGroupHandle_t events_ = nullptr;
@@ -61,9 +62,11 @@ private:
     esp_netif_t *access_point_netif_ = nullptr;
     esp_event_handler_instance_t wifi_handler_ = nullptr;
     esp_event_handler_instance_t ip_handler_ = nullptr;
+    esp_event_handler_instance_t lost_ip_handler_ = nullptr;
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> access_point_active_{false};
+    std::atomic<bool> disable_ap_pending_{false};  // set on reconnect while AP is up
     std::atomic<int64_t> disconnected_at_ms_{0};
     std::atomic<int64_t> last_retry_ms_{0};
     std::atomic<bool> stopping_{false};
@@ -82,8 +85,13 @@ private:
     // default when none is set or it is too short for WPA2).
     void fill_ap_config(wifi_config_t &config) const;
     esp_err_t enable_access_point();
-    // Bring the radio up in AP+STA so the SoftAP stays reachable while the
-    // station (re)associates with the saved network.
+    // Start in STA-only mode (no SoftAP). Used on initial boot and when
+    // updating credentials. The AP is raised by recovery_loop after 2 min offline.
+    esp_err_t enable_station_only(const WifiCredentials &credentials);
+    // Bring the radio up in AP+STA: SoftAP beacons while the station retries.
+    // Called by recovery_loop after kApFallbackMs without a connection.
     esp_err_t enable_ap_sta(const WifiCredentials &credentials);
+    // Switch from APSTA back to pure STA after the station reconnects.
+    esp_err_t disable_access_point();
     void request_connect();
 };

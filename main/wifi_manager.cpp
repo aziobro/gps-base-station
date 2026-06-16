@@ -50,6 +50,10 @@ WifiManager::~WifiManager() {
         esp_event_handler_instance_unregister(
             IP_EVENT, IP_EVENT_STA_GOT_IP, ip_handler_);
     }
+    if (lost_ip_handler_) {
+        esp_event_handler_instance_unregister(
+            IP_EVENT, IP_EVENT_STA_LOST_IP, lost_ip_handler_);
+    }
     if (events_) vEventGroupDelete(events_);
 }
 
@@ -87,16 +91,21 @@ esp_err_t WifiManager::start(Storage &storage) {
         esp_event_handler_instance_register(
             IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, this, &ip_handler_),
         kTag, "IP event registration failed");
+    ESP_RETURN_ON_ERROR(
+        esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_LOST_IP, event_handler, this, &lost_ip_handler_),
+        kTag, "IP lost event registration failed");
 
     const WifiCredentials credentials = storage.load_wifi();
     if (!credentials.valid) {
         ESP_LOGW(kTag, "No saved WiFi credentials; starting access point");
         ESP_RETURN_ON_ERROR(enable_access_point(), kTag, "AP start failed");
     } else {
-        // Run AP + station together so the GPS-BaseStation SoftAP stays
-        // reachable for configuration whether or not the saved network is up.
+        // Start STA-only. recovery_loop raises the SoftAP if the network
+        // stays unreachable for kApFallbackMs; it tears it down again once
+        // the station connects.
         ESP_RETURN_ON_ERROR(
-            enable_ap_sta(credentials), kTag, "AP+STA start failed");
+            enable_station_only(credentials), kTag, "STA start failed");
     }
 
     if (xTaskCreate(
@@ -213,12 +222,30 @@ void WifiManager::handle_event(esp_event_base_t event_base, int32_t event_id,
         disconnected_at_ms_ = 0;
         xEventGroupSetBits(events_, kConnectedBit);
         ESP_LOGI(kTag, "Station connected: " IPSTR, IP2STR(&event->ip_info.ip));
-        // In AP+STA mode the SoftAP stays up deliberately; do not tear it down.
+        // If the AP came up during the offline period, ask recovery_loop to
+        // switch back to STA-only now that we have a working connection.
+        if (access_point_active_) disable_ap_pending_ = true;
+        return;
+    }
+
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        // DHCP lease expired or was dropped by the router while the L2
+        // association was still up (common when the WiFi SDIO link is under
+        // sustained load and the renewal frame is missed).  Without this
+        // handler connected_ stays true with ip=0.0.0.0 and the recovery
+        // loop never retries.
+        connected_ = false;
+        disable_ap_pending_ = false;  // no longer connected; AP teardown is moot
+        xEventGroupClearBits(events_, kConnectedBit);
+        if (disconnected_at_ms_ == 0) disconnected_at_ms_ = now_ms();
+        last_retry_ms_ = now_ms() - kRetryIntervalMs;  // retry immediately
+        ESP_LOGW(kTag, "Station IP lost; forcing re-association");
         return;
     }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         bool was_connected = connected_.exchange(false);
+        disable_ap_pending_ = false;  // no longer connected; AP teardown is moot
         xEventGroupClearBits(events_, kConnectedBit);
         if (disconnected_at_ms_ == 0) disconnected_at_ms_ = now_ms();
         if (was_connected) {
@@ -249,14 +276,42 @@ void WifiManager::recovery_task_entry(void *arg) {
 void WifiManager::recovery_loop() {
     while (!stopping_) {
         const int64_t now = now_ms();
-        // In AP+STA the SoftAP is always beaconing; we only need to keep nudging
-        // the station to (re)associate with the saved network while it is down.
-        const bool have_creds = storage_ && storage_->load_wifi().valid;
-        if (have_creds && !connected_ && now - last_retry_ms_ >= kRetryIntervalMs) {
-            ESP_LOGI(kTag, "Retrying station association");
-            last_retry_ms_ = now;
-            request_connect();
+
+        // Connected and AP is up: switch back to STA-only mode.
+        if (disable_ap_pending_) {
+            disable_ap_pending_ = false;
+            if (disable_access_point() != ESP_OK) {
+                ESP_LOGW(kTag, "AP disable failed; will retry");
+                disable_ap_pending_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
+
+        const bool have_creds = storage_ && storage_->load_wifi().valid;
+        if (have_creds && !connected_) {
+            // How long have we been offline?  (0 means timer not yet started.)
+            const int64_t offline_ms =
+                disconnected_at_ms_ > 0 ? now - disconnected_at_ms_ : 0;
+
+            if (offline_ms >= kApFallbackMs && !access_point_active_ && !connected_) {
+                // Two minutes without a connection: raise the SoftAP so the
+                // device remains configurable via GPS-BaseStation while retrying.
+                const WifiCredentials creds = storage_->load_wifi();
+                if (creds.valid) {
+                    ESP_LOGI(kTag, "Raising SoftAP after %llds offline",
+                             (long long)(offline_ms / 1000));
+                    if (enable_ap_sta(creds) == ESP_OK) {
+                        last_retry_ms_ = now;  // enable_ap_sta already called request_connect
+                    }
+                }
+            } else if (now - last_retry_ms_ >= kRetryIntervalMs) {
+                ESP_LOGI(kTag, "Retrying station association");
+                last_retry_ms_ = now;
+                request_connect();
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -321,10 +376,51 @@ esp_err_t WifiManager::enable_access_point() {
     return ESP_OK;
 }
 
+esp_err_t WifiManager::enable_station_only(const WifiCredentials &credentials) {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
+    if (mode != WIFI_MODE_NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
+    }
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "STA mode failed");
+    ESP_RETURN_ON_ERROR(configure_station(credentials), kTag, "Station config failed");
+    set_wifi_mac_from_efuse(WIFI_IF_STA);
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    access_point_active_ = false;
+    disable_ap_pending_ = false;
+    connected_ = false;
+    disconnected_at_ms_ = 0;
+    last_retry_ms_ = 0;
+    request_connect();
+    ESP_LOGI(kTag, "STA-only mode; connecting to \"%s\"", credentials.ssid.c_str());
+    return ESP_OK;
+}
+
+esp_err_t WifiManager::disable_access_point() {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
+    if (mode != WIFI_MODE_NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_stop());
+    }
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "STA mode failed");
+    // Station credentials are still configured in driver RAM from the last
+    // enable_station_only / enable_ap_sta call; no need to reconfigure.
+    set_wifi_mac_from_efuse(WIFI_IF_STA);
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "WiFi start failed");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    access_point_active_ = false;
+    // Reset the offline timer so the 2-min AP fallback doesn't fire during the
+    // brief reconnect that follows the stop/start.
+    disconnected_at_ms_ = 0;
+    request_connect();
+    ESP_LOGI(kTag, "AP disabled; switched to STA-only mode");
+    return ESP_OK;
+}
+
 // Bring the radio up in AP+STA: the SoftAP beacons continuously while the
-// station associates with the saved network. (Historically the ESP32-C6
-// hosted radio would not beacon in APSTA — this path re-tests that now that
-// the SDIO link is stable.)
+// station retries. (Historically the ESP32-C6 hosted radio would not beacon
+// in APSTA — this path re-tests that now that the SDIO link is stable.)
 esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
     wifi_mode_t mode = WIFI_MODE_NULL;
     ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), kTag, "Get mode failed");
@@ -360,9 +456,7 @@ esp_err_t WifiManager::enable_ap_sta(const WifiCredentials &credentials) {
 
 esp_err_t WifiManager::update_credentials(const WifiCredentials &credentials) {
     esp_wifi_disconnect();
-    // Bring the radio back up in AP+STA so the SoftAP stays reachable while the
-    // newly entered network is attempted.
-    return enable_ap_sta(credentials);
+    return enable_station_only(credentials);
 }
 
 esp_err_t WifiManager::apply_ap_settings() {
@@ -380,6 +474,11 @@ esp_err_t WifiManager::apply_ap_settings() {
 }
 
 void WifiManager::request_connect() {
+    // Unconditional disconnect ensures a clean re-association: esp_wifi_connect()
+    // returns ESP_ERR_WIFI_CONN (silently ignored) when L2 is still up.
+    // That's exactly what happens after IP_EVENT_STA_LOST_IP — the association
+    // survives the lease loss, so without this the DHCP client never restarts.
+    esp_wifi_disconnect();
     esp_err_t result = esp_wifi_connect();
     if (result != ESP_OK && result != ESP_ERR_WIFI_CONN) {
         ESP_LOGW(kTag, "Connect request failed: %s", esp_err_to_name(result));

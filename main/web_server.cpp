@@ -6,8 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <dirent.h>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <vector>
 
 #include "app_config.hpp"
@@ -30,6 +32,59 @@ namespace {
 
 constexpr char kTag[] = "web";
 constexpr char kAdminUser[] = "admin";
+constexpr char kRawDataDir[] = "/sdcard/rawdata";
+
+// Convert a Gregorian UTC date/time to Unix seconds.  Accurate for 2000–2099.
+time_t utc_to_unix(int Y, int Mo, int D, int h, int m, int s) {
+    static const int moff[] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    int y = Y - 1970;
+    int leaps = y > 0 ? (y - 1) / 4 + 1 : 0;
+    bool isleap = (Y % 4 == 0 && (Y % 100 != 0 || Y % 400 == 0));
+    long days = (long)y * 365 + leaps + moff[Mo - 1] + (Mo > 2 && isleap ? 1 : 0) + (D - 1);
+    return (time_t)(days * 86400L + h * 3600L + m * 60L + s);
+}
+
+// Parse "YYYY-MM-DDTHH:MM" or "YYYY-MM-DDTHH:MM:SS" (UTC) → Unix time.
+time_t parse_datetime_input(const char *s) {
+    int Y = 0, Mo = 0, D = 0, h = 0, m = 0, sec = 0;
+    if (sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &Mo, &D, &h, &m, &sec) < 5) return -1;
+    if (Y < 2020 || Y > 2099 || Mo < 1 || Mo > 12 || D < 1 || D > 31) return -1;
+    return utc_to_unix(Y, Mo, D, h, m, sec);
+}
+
+// Parse "BASE_YYYYMMDD_HHMMSS.rnx" (GPS time ≈ UTC for selection) → Unix time.
+time_t parse_rinex_filename_utc(const char *name) {
+    int Y, Mo, D, h, m, s;
+    if (sscanf(name, "BASE_%4d%2d%2d_%2d%2d%2d.rnx", &Y, &Mo, &D, &h, &m, &s) != 6) return -1;
+    if (Y < 2020) return -1;
+    return utc_to_unix(Y, Mo, D, h, m, s);
+}
+
+// Return sorted list of rawdata .rnx paths whose 1-hour window overlaps [start, end].
+std::vector<std::string> select_rinex_files(time_t start, time_t end) {
+    DIR *dir = opendir(kRawDataDir);
+    if (!dir) return {};
+    constexpr time_t kFileSpan = 3600 + 120;  // file duration + 2-min margin
+    constexpr time_t kMargin   = 120;
+    std::vector<std::pair<time_t, std::string>> found;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_type != DT_REG) continue;
+        time_t ft = parse_rinex_filename_utc(ent->d_name);
+        if (ft < 0) continue;
+        if (ft < end + kMargin && ft + kFileSpan > start - kMargin) {
+            char path[280];
+            snprintf(path, sizeof(path), "%s/%s", kRawDataDir, ent->d_name);
+            found.push_back({ft, path});
+        }
+    }
+    closedir(dir);
+    std::sort(found.begin(), found.end());
+    std::vector<std::string> paths;
+    paths.reserve(found.size());
+    for (auto &p : found) paths.push_back(std::move(p.second));
+    return paths;
+}
 
 extern const unsigned char server_cert_start[]
     asm("_binary_server_cert_pem_start");
@@ -267,8 +322,9 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/files/rename", HTTP_POST, files_rename_handler, this},
         {"/files/mkdir", HTTP_POST, files_mkdir_handler, this},
         {"/rinex/toggle", HTTP_POST, rinex_toggle_handler, this},
+        {"/rinex/export", HTTP_GET,  rinex_export_page_handler, this},
+        {"/rinex/export", HTTP_POST, rinex_export_handler, this},
         {"/ntrip/toggle", HTTP_POST, ntrip_toggle_handler, this},
-        {"/files/rinex_merge", HTTP_POST, files_rinex_merge_handler, this},
     };
     for (const auto &handler : handlers) {
         ESP_RETURN_ON_ERROR(
@@ -487,6 +543,7 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         "</table><p><a href='/config'>Configuration</a> &nbsp; "
         "<a href='/skyplot'>Sky plot</a> &nbsp; "
         "<a href='/files'>SD card files</a> &nbsp; "
+        "<a href='/rinex/export'>RINEX export</a> &nbsp; "
         "<a href='/logs'>Console logs</a> &nbsp; "
         "<a href='/status'>JSON status</a> &nbsp; "
         "<a href='/update'>Firmware update</a></p>"
@@ -1385,24 +1442,22 @@ esp_err_t AdminWebServer::files_page_handler(httpd_req_t *request) {
     }
 
     std::string content =
-        "<p><a href='/' style='color:#0d0'>&larr; Status</a></p>"
+        "<p><a href='/' style='color:#0d0'>&larr; Status</a> &nbsp; "
+        "<a href='/rinex/export' style='color:#08f'>RINEX export &rarr;</a></p>"
         "<h2>SD Card Files</h2>" +
         storage_block +
         "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap'>"
         "<div id='breadcrumb' style='color:#888;word-break:break-all;flex:1'>/</div>"
-        "<button id='merge-btn' onclick='mergeSelected()' style='display:none;padding:3px 10px;background:#1a1a1a;color:#08f;border:1px solid #08f;cursor:pointer;white-space:nowrap'>&#8659; Merge &amp; Download</button>"
         "<button id='mkdir-btn' onclick='mkdirPrompt()' style='padding:3px 10px;background:#1a1a1a;color:#0f0;border:1px solid #0f0;cursor:pointer;white-space:nowrap'>+ New Folder</button>"
         "</div>"
-        "<div id='merge-status' style='display:none;padding:6px 0;font-size:0.85em'></div>"
         "<div style='overflow-x:auto'>"
         "<table><thead><tr>"
-        "<th style='text-align:left;padding:4px 8px;width:18px' id='sel-th'></th>"
         "<th style='text-align:left;padding:4px 8px'>Name</th>"
         "<th style='text-align:right;padding:4px 8px'>Size</th>"
         "<th style='text-align:right;padding:4px 8px'>Actions</th>"
         "</tr></thead>"
         "<tbody id='file-list'>"
-        "<tr><td colspan='4' style='padding:10px 8px;color:#888'>Loading&hellip;</td></tr>"
+        "<tr><td colspan='3' style='padding:10px 8px;color:#888'>Loading&hellip;</td></tr>"
         "</tbody></table></div>"
         "<script>var SD_ROOT='" + mount + "';</script>"
         R"JSEOF(
@@ -1411,7 +1466,6 @@ var filePath=SD_ROOT;
 var fileEntries=[];
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fmtSize(b){if(b===0)return'<span style="color:#888">Folder</span>';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
-function isRnx(name){return name.toLowerCase().endsWith('.rnx');}
 function breadcrumb(path){
   var parts=path.split('/').filter(function(p){return p.length>0;});
   var html='<span style="color:#555">/ </span>';var built='';
@@ -1421,38 +1475,23 @@ function breadcrumb(path){
   });
   document.getElementById('breadcrumb').innerHTML=html;
 }
-function updateMergeBtn(){
-  var checked=document.querySelectorAll('.rnx-cb:checked');
-  var btn=document.getElementById('merge-btn');
-  if(btn)btn.style.display=checked.length>=2?'':'none';
-}
 function loadDir(path){
   filePath=path;breadcrumb(path);
   var tb=document.getElementById('file-list');
-  tb.innerHTML='<tr><td colspan="4" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
-  var mergeBtn=document.getElementById('merge-btn');
-  if(mergeBtn)mergeBtn.style.display='none';
-  var mergeStatus=document.getElementById('merge-status');
-  if(mergeStatus)mergeStatus.style.display='none';
+  tb.innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#888">Loading&hellip;</td></tr>';
   fetch('/files/list?path='+encodeURIComponent(path))
     .then(function(r){return r.json();}).then(function(entries){
       fileEntries=entries.sort(function(a,b){
         if(a.is_dir!==b.is_dir)return a.is_dir?-1:1;
         return a.name<b.name?-1:a.name>b.name?1:0;
       });
-      var hasRnx=fileEntries.some(function(e){return!e.is_dir&&isRnx(e.name);});
-      var selTh=document.getElementById('sel-th');
-      if(selTh)selTh.style.display=hasRnx?'':'none';
       var rows='';
       if(path!==SD_ROOT){
         var parent=path.substring(0,path.lastIndexOf('/'))||SD_ROOT;
-        rows+='<tr><td></td><td colspan="3" style="padding:5px 8px"><a href="#" onclick="loadDir(\''+esc(parent)+'\');return false" style="color:#0d0">&#8679; ..</a></td></tr>';
+        rows+='<tr><td colspan="3" style="padding:5px 8px"><a href="#" onclick="loadDir(\''+esc(parent)+'\');return false" style="color:#0d0">&#8679; ..</a></td></tr>';
       }
-      if(!fileEntries.length){rows+='<tr><td colspan="4" style="padding:10px 8px;color:#888">Empty directory</td></tr>';}
+      if(!fileEntries.length){rows+='<tr><td colspan="3" style="padding:10px 8px;color:#888">Empty directory</td></tr>';}
       fileEntries.forEach(function(e,i){
-        var cbCell=(!e.is_dir&&isRnx(e.name))
-          ?'<input type="checkbox" class="rnx-cb" data-path="'+esc(e.path)+'" onchange="updateMergeBtn()" style="cursor:pointer">'
-          :'';
         var nameCell=e.is_dir
           ?'<a href="#" onclick="loadDir(fileEntries['+i+'].path);return false" style="color:#0d0">[dir] '+esc(e.name)+'</a>'
           :'[file] '+esc(e.name);
@@ -1461,67 +1500,16 @@ function loadDir(path){
         acts+='<button onclick="renameEntry('+i+')" title="Rename" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#fa0;border:1px solid #fa0;cursor:pointer">rn</button>';
         acts+='<button onclick="delEntry('+i+')" title="Delete" style="margin:1px;padding:2px 6px;background:#1a1a1a;color:#f44;border:1px solid #f44;cursor:pointer">del</button>';
         rows+='<tr style="border-bottom:1px solid #222">'
-          +'<td style="padding:6px 4px;text-align:center">'+cbCell+'</td>'
           +'<td style="padding:6px 8px">'+nameCell+'</td>'
           +'<td style="padding:6px 8px;text-align:right;color:#888">'+fmtSize(e.size)+'</td>'
           +'<td style="padding:6px 4px;text-align:right;white-space:nowrap">'+acts+'</td></tr>';
       });
       tb.innerHTML=rows;
     }).catch(function(){
-      document.getElementById('file-list').innerHTML='<tr><td colspan="4" style="padding:10px 8px;color:#f44">Failed to load directory</td></tr>';
+      document.getElementById('file-list').innerHTML='<tr><td colspan="3" style="padding:10px 8px;color:#f44">Failed to load directory</td></tr>';
     });
 }
 function dlFile(i){window.location.href='/files/download?path='+encodeURIComponent(fileEntries[i].path);}
-function mergeSelected(){
-  var cbs=document.querySelectorAll('.rnx-cb:checked');
-  if(cbs.length<2){alert('Select at least 2 RINEX files to merge.');return;}
-  var files=Array.from(cbs).map(function(cb){return cb.getAttribute('data-path');});
-  var btn=document.getElementById('merge-btn');
-  var statusEl=document.getElementById('merge-status');
-  btn.disabled=true;
-  btn.textContent='Merging…';
-  statusEl.style.display='';
-  statusEl.style.color='#888';
-  var t0=Date.now(),rx=0;
-  var timer=setInterval(function(){
-    var s=Math.round((Date.now()-t0)/1000);
-    statusEl.textContent=rx>0
-      ?'Downloading… '+(rx/1024).toFixed(0)+' KB — '+s+'s elapsed — do not navigate away.'
-      :'Merging '+cbs.length+' file'+(cbs.length===1?'':'s')+'… '+s+'s elapsed — do not navigate away.';
-  },1000);
-  var xhr=new XMLHttpRequest();
-  xhr.open('POST','/files/rinex_merge');
-  xhr.setRequestHeader('Content-Type','application/json');
-  xhr.responseType='blob';
-  xhr.timeout=600000;
-  xhr.onprogress=function(e){rx=e.loaded;};
-  xhr.onload=function(){
-    clearInterval(timer);
-    if(xhr.status===200){
-      var blob=xhr.response;
-      var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='merged.rnx';a.click();URL.revokeObjectURL(a.href);
-      statusEl.style.color='#0f0';
-      statusEl.textContent='✓ Done — '+(blob.size/1024).toFixed(0)+' KB merged and downloaded.';
-    }else{
-      statusEl.style.color='#f44';
-      statusEl.textContent='✗ Merge failed (HTTP '+xhr.status+').';
-    }
-    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
-  };
-  xhr.ontimeout=function(){
-    clearInterval(timer);
-    statusEl.style.color='#f44';
-    statusEl.textContent='✗ Merge timed out — try fewer files.';
-    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
-  };
-  xhr.onerror=function(){
-    clearInterval(timer);
-    statusEl.style.color='#f44';
-    statusEl.textContent='✗ Merge failed — check connection.';
-    btn.disabled=false;btn.textContent='⇓ Merge & Download';btn.style.display='';
-  };
-  xhr.send(JSON.stringify({files:files}));
-}
 function renameEntry(i){
   var e=fileEntries[i];
   var n=prompt('Rename "'+e.name+'" to:',e.name);
@@ -1602,10 +1590,14 @@ esp_err_t AdminWebServer::files_download_handler(httpd_req_t *request) {
     snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"", filename);
     httpd_resp_set_type(request, "application/octet-stream");
     httpd_resp_set_hdr(request, "Content-Disposition", disp);
-    char buf[1024];
+    // 4 KB chunks reduce TLS-record overhead per byte; one tick (10 ms @ 100 Hz)
+    // between chunks paces output to ~400 KB/s so we don't flood the esp_hosted
+    // SDIO queue and cause silent TCP packet drops / download stalls.
+    char buf[4096];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
         if (httpd_resp_send_chunk(request, buf, static_cast<ssize_t>(n)) != ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     fclose(f);
     httpd_resp_send_chunk(request, nullptr, 0);
@@ -1687,46 +1679,160 @@ esp_err_t AdminWebServer::ntrip_toggle_handler(httpd_req_t *request) {
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
-// POST /files/rinex_merge  body: {"files":["/path/a.rnx","/path/b.rnx",...]}
-// Streams a merged RINEX file: header from the first file, then observation
-// epochs from all files (skipping subsequent headers).
-esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
+// GET /rinex/export  — date/time picker page
+esp_err_t AdminWebServer::rinex_export_page_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
 
-    const std::string body = read_body(request, 4096);
+    // Scan rawdata to find the earliest and latest available RINEX files.
+    time_t t_min = 0, t_max = 0;
+    {
+        DIR *dir = opendir(kRawDataDir);
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != nullptr) {
+                if (ent->d_type != DT_REG) continue;
+                time_t ft = parse_rinex_filename_utc(ent->d_name);
+                if (ft <= 0) continue;
+                if (t_min == 0 || ft < t_min) t_min = ft;
+                if (ft > t_max) t_max = ft;
+            }
+            closedir(dir);
+        }
+    }
+    if (t_max > 0) t_max += 3600;  // end of last file's hour
+
+    // Format Unix time as "YYYY-MM-DDTHH:MM" for datetime-local inputs.
+    auto fmt_dt = [](time_t t, char *buf, size_t len) {
+        struct tm tm {};
+        gmtime_r(&t, &tm);
+        snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min);
+    };
+
+    char start_val[20] = "", end_val[20] = "";
+    if (t_min > 0) fmt_dt(t_min, start_val, sizeof(start_val));
+    if (t_max > 0) fmt_dt(t_max, end_val, sizeof(end_val));
+
+    const std::string no_data_note = (t_min == 0)
+        ? "<p style='color:#f84'>No RINEX files found in /rawdata.</p>"
+        : "";
+
+    httpd_resp_set_type(request, "text/html");
+    const std::string page =
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>RINEX Export</title>"
+        "<style>body{background:#0d0d0d;color:#e0e0e0;font-family:monospace;max-width:560px;margin:0 auto;padding:16px}"
+        "h2{color:#0f0}input{background:#1a1a1a;color:#e0e0e0;border:1px solid #444;padding:5px 8px;width:100%;box-sizing:border-box;font-family:monospace}"
+        "label{display:block;margin:10px 0 4px;color:#888}"
+        "button{margin-top:16px;padding:8px 20px;background:#1a1a1a;color:#08f;border:1px solid #08f;cursor:pointer;font-family:monospace;font-size:1em}"
+        "button:disabled{color:#444;border-color:#444;cursor:default}"
+        "#status{margin-top:12px;font-size:0.85em;min-height:1.5em}"
+        "</style></head><body>"
+        "<p><a href='/files' style='color:#0d0'>&larr; SD Files</a> &nbsp; "
+        "<a href='/' style='color:#0d0'>&larr; Status</a></p>"
+        "<h2>RINEX Export</h2>" +
+        no_data_note +
+        "<p style='color:#888;font-size:0.85em'>Select a UTC time range. All 1-hour RINEX files within that range will be merged into a single download.</p>"
+        "<label for='start'>Start (UTC)</label>"
+        "<input type='datetime-local' id='start' value='" + std::string(start_val) + "'>"
+        "<label for='end'>End (UTC)</label>"
+        "<input type='datetime-local' id='end' value='" + std::string(end_val) + "'>"
+        "<br><button id='btn' onclick='doExport()'>&#8659; Export &amp; Download</button>"
+        "<div id='status'></div>"
+        "<script>"
+        "function doExport(){"
+        "var s=document.getElementById('start').value;"
+        "var e=document.getElementById('end').value;"
+        "if(!s||!e){alert('Please set both start and end times.');return;}"
+        "if(s>=e){alert('Start must be before end.');return;}"
+        "var btn=document.getElementById('btn');"
+        "var st=document.getElementById('status');"
+        "btn.disabled=true;btn.textContent='Exporting…';"
+        "st.style.color='#888';st.textContent='Requesting files…';"
+        "var t0=Date.now(),rx=0;"
+        "var timer=setInterval(function(){"
+        "var sec=Math.round((Date.now()-t0)/1000);"
+        "st.textContent=rx>0"
+        "?'Downloading… '+(rx/1024).toFixed(0)+' KB — '+sec+'s elapsed — do not navigate away.'"
+        ":'Merging… '+sec+'s elapsed — do not navigate away.';"
+        "},1000);"
+        "var xhr=new XMLHttpRequest();"
+        "xhr.open('POST','/rinex/export');"
+        "xhr.setRequestHeader('Content-Type','application/json');"
+        "xhr.responseType='blob';"
+        "xhr.timeout=600000;"
+        "xhr.onprogress=function(ev){rx=ev.loaded;};"
+        "xhr.onload=function(){"
+        "clearInterval(timer);"
+        "if(xhr.status===200){"
+        "var blob=xhr.response;"
+        "var a=document.createElement('a');a.href=URL.createObjectURL(blob);"
+        "var fn='rinex_'+s.replace(/[T:]/g,'').replace(/-/g,'')+'.rnx';"
+        "a.download=fn;a.click();URL.revokeObjectURL(a.href);"
+        "st.style.color='#0f0';"
+        "st.textContent='✓ Done — '+(blob.size/1024).toFixed(0)+' KB downloaded.';"
+        "}else{"
+        "st.style.color='#f44';"
+        "st.textContent='✗ Export failed (HTTP '+xhr.status+'). Check that files exist for this range.';"
+        "}"
+        "btn.disabled=false;btn.textContent='⇓ Export & Download';"
+        "};"
+        "xhr.ontimeout=function(){clearInterval(timer);st.style.color='#f44';st.textContent='✗ Timed out.';btn.disabled=false;btn.textContent='⇓ Export & Download';};"
+        "xhr.onerror=function(){clearInterval(timer);st.style.color='#f44';st.textContent='✗ Network error.';btn.disabled=false;btn.textContent='⇓ Export & Download';};"
+        "xhr.send(JSON.stringify({start:s,end:e}));"
+        "}"
+        "</script></body></html>";
+
+    return send_chunks(request, page);
+}
+
+// POST /rinex/export  body: {"start":"YYYY-MM-DDTHH:MM","end":"YYYY-MM-DDTHH:MM"}
+// Selects matching rawdata .rnx files and streams them merged.
+esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+
+    const std::string body = read_body(request, 256);
     if (body.empty()) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "No body");
     }
 
-    // Parse JSON string array under key "files": ["path1","path2",...]
-    std::vector<std::string> paths;
-    const std::string needle = "\"files\":[";
-    size_t arr = body.find(needle);
-    if (arr != std::string::npos) {
-        arr += needle.size();
-        while (arr < body.size() && body[arr] != ']') {
-            size_t qs = body.find('"', arr);
-            if (qs == std::string::npos) break;
-            size_t qe = body.find('"', qs + 1);
-            if (qe == std::string::npos) break;
-            const std::string val = body.substr(qs + 1, qe - qs - 1);
-            if (!val.empty() && SdManager::safe_path(val.c_str())) {
-                paths.push_back(val);
-            }
-            arr = qe + 1;
-        }
+    // Extract "start" and "end" string values from the JSON body.
+    auto extract_field = [&](const char *key) -> std::string {
+        const std::string needle = std::string("\"") + key + "\":\"";
+        size_t p = body.find(needle);
+        if (p == std::string::npos) return {};
+        p += needle.size();
+        size_t q = body.find('"', p);
+        if (q == std::string::npos) return {};
+        return body.substr(p, q - p);
+    };
+
+    const time_t start = parse_datetime_input(extract_field("start").c_str());
+    const time_t end   = parse_datetime_input(extract_field("end").c_str());
+
+    if (start < 0 || end < 0 || end <= start) {
+        return httpd_resp_send_err(
+            request, HTTPD_400_BAD_REQUEST, "Invalid time range");
     }
+
+    const std::vector<std::string> paths = select_rinex_files(start, end);
     if (paths.empty()) {
         return httpd_resp_send_err(
-            request, HTTPD_400_BAD_REQUEST, "No valid files");
+            request, HTTPD_404_NOT_FOUND, "No RINEX files in range");
     }
 
     httpd_resp_set_type(request, "application/octet-stream");
     httpd_resp_set_hdr(request, "Content-Disposition",
-                       "attachment; filename=\"merged.rnx\"");
+                       "attachment; filename=\"export.rnx\"");
 
-    char buf[1024];
+    // 4 KB chunks + one tick (10 ms @ 100 Hz) paces output to ~400 KB/s,
+    // staying within esp_hosted SDIO bandwidth.
+    char buf[4096];
     bool header_sent = false;
 
     for (const std::string &path : paths) {
@@ -1734,7 +1840,6 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
         if (!f) continue;
 
         if (!header_sent) {
-            // Stream the entire first file (header + observations).
             size_t n;
             while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
                 if (httpd_resp_send_chunk(
@@ -1742,11 +1847,10 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
                     fclose(f);
                     goto done;
                 }
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
             header_sent = true;
         } else {
-            // Skip lines until END OF HEADER, then stream the rest in
-            // bulk blocks — one chunk per fread rather than per line.
             bool past_header = false;
             while (!past_header && fgets(buf, sizeof(buf), f)) {
                 if (strstr(buf, "END OF HEADER")) past_header = true;
@@ -1759,6 +1863,7 @@ esp_err_t AdminWebServer::files_rinex_merge_handler(httpd_req_t *request) {
                         fclose(f);
                         goto done;
                     }
+                    vTaskDelay(pdMS_TO_TICKS(1));
                 }
             }
         }

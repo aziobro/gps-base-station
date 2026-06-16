@@ -55,7 +55,8 @@ private:
     static esp_err_t files_mkdir_handler(httpd_req_t *request);
     static esp_err_t rinex_toggle_handler(httpd_req_t *request);
     static esp_err_t ntrip_toggle_handler(httpd_req_t *request);
-    static esp_err_t files_rinex_merge_handler(httpd_req_t *request);
+    static esp_err_t rinex_export_page_handler(httpd_req_t *request);
+    static esp_err_t rinex_export_handler(httpd_req_t *request);
 
     bool authorize(httpd_req_t *request) const;
     esp_err_t send_unauthorized(httpd_req_t *request) const;
