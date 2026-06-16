@@ -1826,6 +1826,26 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
             request, HTTPD_404_NOT_FOUND, "No RINEX files in range");
     }
 
+    // Read the TIME OF LAST OBS value field (columns 1–60) from the last file's
+    // header so we can patch it into the first file's header on output.
+    // RINEX 3 header lines: cols 1-60 = value, cols 61-80 = label.
+    char last_obs_value[61] = {};  // 60 chars + NUL
+    {
+        FILE *lf = fopen(paths.back().c_str(), "r");
+        if (lf) {
+            char line[128];
+            while (fgets(line, sizeof(line), lf)) {
+                size_t len = strlen(line);
+                if (len >= 76 && strncmp(line + 60, "TIME OF LAST OBS", 16) == 0) {
+                    memcpy(last_obs_value, line, 60);
+                    break;
+                }
+                if (len >= 60 && strstr(line + 60, "END OF HEADER")) break;
+            }
+            fclose(lf);
+        }
+    }
+
     httpd_resp_set_type(request, "application/octet-stream");
     httpd_resp_set_hdr(request, "Content-Disposition",
                        "attachment; filename=\"export.rnx\"");
@@ -1840,6 +1860,36 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
         if (!f) continue;
 
         if (!header_sent) {
+            // Stream first file's header line by line so we can patch
+            // TIME OF LAST OBS, then bulk-read the observations.
+            bool past_header = false;
+            while (!past_header) {
+                if (!fgets(buf, sizeof(buf), f)) break;
+                size_t len = strlen(buf);
+                // Detect line ending from the original line (\r\n or \n).
+                const char *eol = (len >= 2 && buf[len - 2] == '\r') ? "\r\n" : "\n";
+
+                if (last_obs_value[0] != '\0' && len >= 76 &&
+                    strncmp(buf + 60, "TIME OF LAST OBS", 16) == 0) {
+                    // Replace the 60-char value field, preserve label and line ending.
+                    char patched[90];
+                    int pl = snprintf(patched, sizeof(patched),
+                                      "%sTIME OF LAST OBS    %s",
+                                      last_obs_value, eol);
+                    if (httpd_resp_send_chunk(request, patched, pl) != ESP_OK) {
+                        fclose(f);
+                        goto done;
+                    }
+                } else {
+                    if (httpd_resp_send_chunk(
+                            request, buf, static_cast<ssize_t>(len)) != ESP_OK) {
+                        fclose(f);
+                        goto done;
+                    }
+                }
+                if (len >= 60 && strstr(buf + 60, "END OF HEADER")) past_header = true;
+            }
+            // Bulk-stream the observations from the first file.
             size_t n;
             while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
                 if (httpd_resp_send_chunk(
