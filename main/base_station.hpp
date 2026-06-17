@@ -52,8 +52,8 @@ public:
     void set_streams_enabled(bool enabled);
     // Apply the persisted NTRIP on/off state (called after the boot hold-off).
     void apply_persisted_streams();
-    bool streams_suspended() const { return external_suspend_; }
-    bool streams_enabled() const { return !external_suspend_; }
+    bool streams_suspended() const { return effective_streams_suspended(); }
+    bool streams_enabled() const { return user_streams_enabled_; }
     bool healthy() const;
 
     BaseStationStatus status() const;
@@ -87,7 +87,8 @@ private:
     QueueHandle_t actions_ = nullptr;
     TaskHandle_t task_ = nullptr;
     std::atomic<bool> stopping_{false};
-    std::atomic<bool> external_suspend_{false};
+    std::atomic<bool> transient_streams_suspended_{true};
+    std::atomic<bool> user_streams_enabled_{true};
     std::atomic<bool> has_rtcm_data_{false};
     std::atomic<bool> raw_collection_{false};
     std::atomic<BaseMode> mode_{BaseMode::kSurvey};
@@ -105,6 +106,7 @@ private:
     void enter_transmit(double lat, double lon, double height);
     void enter_raw_collection();
     void exit_raw_collection();
+    bool effective_streams_suspended() const;
     void apply_stream_state();
     void read_command_uart();
     void read_data_uart();

@@ -32,7 +32,7 @@ struct NtripStatus {
 class NtripPushClient {
 public:
     NtripPushClient(const char *label, const char *host, uint16_t port,
-                    NtripProtocol protocol);
+                    NtripProtocol protocol, uint32_t connect_stagger_ms = 0);
     ~NtripPushClient();
 
     esp_err_t start(
@@ -59,6 +59,7 @@ private:
     const char *host_;
     uint16_t port_;
     NtripProtocol protocol_;
+    uint32_t connect_stagger_ms_;
     QueueHandle_t queue_ = nullptr;
     TaskHandle_t task_ = nullptr;
     std::atomic<bool> stopping_{false};
@@ -71,6 +72,7 @@ private:
     // Microsecond timestamps (esp_timer) for connection uptime / send freshness.
     std::atomic<int64_t> connected_since_us_{0};
     std::atomic<int64_t> last_send_us_{0};
+    std::atomic<int64_t> resumed_us_{0};
     mutable std::mutex config_mutex_;
     bool enabled_ = false;
     std::string mountpoint_;

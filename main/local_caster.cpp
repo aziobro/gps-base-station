@@ -21,6 +21,7 @@ LocalCaster::~LocalCaster() {
 }
 
 esp_err_t LocalCaster::start() {
+    stopping_ = false;
     queue_ = xQueueCreate(kQueueDepth, sizeof(Packet));
     if (!queue_) return ESP_ERR_NO_MEM;
     // Priority 3: below httpd (5) so local NTRIP broadcast never delays
@@ -34,9 +35,9 @@ esp_err_t LocalCaster::start() {
 }
 
 void LocalCaster::stop() {
-    if (!task_) return;
     stopping_ = true;
     while (task_) vTaskDelay(pdMS_TO_TICKS(10));
+    close_all();
     if (queue_) {
         vQueueDelete(queue_);
         queue_ = nullptr;
@@ -206,14 +207,27 @@ void LocalCaster::recount_clients() {
 bool LocalCaster::send_all(
     int socket_fd, const uint8_t *data, size_t length) {
     size_t offset = 0;
+    int stalls = 0;
     while (offset < length) {
         const int sent = send(
             socket_fd, data + offset, length - offset, MSG_DONTWAIT);
         if (sent > 0) {
             offset += sent;
+            stalls = 0;
             continue;
         }
         if (sent < 0 && errno == EINTR) continue;
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set write_set;
+            FD_ZERO(&write_set);
+            FD_SET(socket_fd, &write_set);
+            timeval timeout{0, 100000};
+            const int ready = select(
+                socket_fd + 1, nullptr, &write_set, nullptr, &timeout);
+            if (ready > 0) continue;
+            if (ready < 0 && errno == EINTR) continue;
+            if (++stalls < 10) continue;
+        }
         return false;
     }
     return true;

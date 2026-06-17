@@ -16,5 +16,23 @@ if(EXISTS "${_WR_DIR}" AND NOT EXISTS "${_WR_SHIM}")
     file(WRITE "${_WR_SHIM}" "rsource \"./Kconfig.idf_v6.0.in\"\n")
 endif()
 
+# esp_hosted 2.12.9 renamed the host-to-ESP throttle Kconfig symbol, but one
+# generated host config header still checks the old name. Patch the managed
+# component before configure so the sdkconfig thresholds are actually sent to
+# the C6 coprocessor.
+set(_HOSTED_CFG
+    "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_hosted/host/port/esp/freertos/include/port_esp_hosted_host_config.h")
+if(EXISTS "${_HOSTED_CFG}")
+    file(READ "${_HOSTED_CFG}" _HOSTED_CFG_TEXT)
+    string(REPLACE
+        "#ifdef CONFIG_HOST_TO_ESP_WIFI_DATA_THROTTLE"
+        "#if defined(CONFIG_ESP_HOSTED_HOST_TO_ESP_WIFI_DATA_THROTTLE) || \\\n    defined(CONFIG_HOST_TO_ESP_WIFI_DATA_THROTTLE)"
+        _HOSTED_CFG_PATCHED
+        "${_HOSTED_CFG_TEXT}")
+    if(NOT _HOSTED_CFG_PATCHED STREQUAL _HOSTED_CFG_TEXT)
+        file(WRITE "${_HOSTED_CFG}" "${_HOSTED_CFG_PATCHED}")
+    endif()
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(gps_base_station)

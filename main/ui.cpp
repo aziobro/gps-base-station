@@ -1347,7 +1347,7 @@ void Ui::refresh() {
 
     // Sync global NTRIP toggle without retriggering the callback
     if (sw_ntrip_all_) {
-        bool enabled = !station_->streams_suspended();
+        bool enabled = station_->streams_enabled();
         bool sw_on   = lv_obj_has_state(sw_ntrip_all_, LV_STATE_CHECKED);
         if (enabled != sw_on) {
             if (enabled) lv_obj_add_state(sw_ntrip_all_, LV_STATE_CHECKED);

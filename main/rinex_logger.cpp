@@ -75,8 +75,12 @@ void RinexLogger::start(double lat, double lon, double height,
     geodetic_to_ecef(lat, lon, height, ecef_x_, ecef_y_, ecef_z_);
     in_msg_  = false;
     msg_len_ = 0;
-    epochs_  = 0;
-    files_   = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_file_.clear();
+        epochs_ = 0;
+        files_ = 0;
+    }
     active_  = true;
     ESP_LOGI(kTag, "RINEX collection started (%.7f, %.7f, %.3f m)", lat, lon, height);
 }
@@ -89,6 +93,7 @@ void RinexLogger::stop() {
 }
 
 RinexLogger::Status RinexLogger::status() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     return {active_.load(), epochs_, files_, current_file_};
 }
 
@@ -359,10 +364,13 @@ void RinexLogger::open_file(int gps_week, double tow) {
         ESP_LOGE(kTag, "Cannot open %s", fname);
         return;
     }
-    current_file_  = fname;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_file_ = fname;
+        epochs_ = 0;
+    }
     gps_week_open_ = gps_week;
     tow_open_      = tow;
-    epochs_        = 0;
     last_obs_pos_  = 0;
     last_obs_week_ = gps_week;
     last_obs_tow_  = tow;
@@ -392,9 +400,16 @@ void RinexLogger::close_file() {
 
     fclose(file_);
     file_ = nullptr;
-    ++files_;
-    ESP_LOGI(kTag, "Closed RINEX file: %s (%d epochs)", current_file_.c_str(), epochs_);
-    current_file_.clear();
+    std::string closed_file;
+    int closed_epochs = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ++files_;
+        closed_file = current_file_;
+        closed_epochs = epochs_;
+        current_file_.clear();
+    }
+    ESP_LOGI(kTag, "Closed RINEX file: %s (%d epochs)", closed_file.c_str(), closed_epochs);
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +553,9 @@ void RinexLogger::write_epoch(int gps_week, double tow,
     // slot are flushed together in one call.
     fflush(file_);
     fsync(fileno(file_));
-    ++epochs_;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ++epochs_;
+    }
     ESP_LOGI(kTag, "Epoch GPS %d %.1f — %d satellites", gps_week, tow, (int)epoch.size());
 }

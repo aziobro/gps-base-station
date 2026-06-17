@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 // In-memory ring buffer that captures ESP-IDF console output so it can be
@@ -15,5 +16,15 @@ void init();
 // Returns a copy of the currently buffered log text (oldest first). Safe to
 // call from any task; takes the buffer lock briefly.
 std::string snapshot();
+
+struct Snapshot {
+    uint64_t next = 0;
+    bool truncated = false;
+    std::string text;
+};
+
+// Returns bytes appended after the absolute cursor in `since`. A cursor of 0
+// returns the current buffer contents.
+Snapshot snapshot_since(uint64_t since);
 
 }  // namespace log_buffer

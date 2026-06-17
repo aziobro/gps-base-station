@@ -24,49 +24,65 @@ BaseStation::BaseStation(
       rtk2go_("RTK2go", config::kRtk2goHost, config::kRtk2goPort,
               NtripProtocol::kV1),
       onocoy_("Onocoy", config::kOnocoyHost, config::kOnocoyPort,
-              NtripProtocol::kV2),
+              NtripProtocol::kV2, 10000),
       rtkdata_("RTKdata", config::kRtkdataHost, config::kRtkdataPort,
-               NtripProtocol::kV1) {}
+               NtripProtocol::kV1, 20000) {}
 
 BaseStation::~BaseStation() {
     stop();
 }
 
 esp_err_t BaseStation::start() {
+    stopping_ = false;
     actions_ = xQueueCreate(4, sizeof(Action));
     if (!actions_) return ESP_ERR_NO_MEM;
+
+    user_streams_enabled_ = storage_.ntrip_streams_enabled();
+    transient_streams_suspended_ = true;
+
+    auto cleanup_failed_start = [this](esp_err_t err, const char *message) {
+        ESP_LOGE(kTag, "%s: %s", message, esp_err_to_name(err));
+        local_caster_.stop();
+        rtkdata_.stop();
+        onocoy_.stop();
+        rtk2go_.stop();
+        if (actions_) {
+            vQueueDelete(actions_);
+            actions_ = nullptr;
+        }
+        return err;
+    };
 
     const ServiceCredentials rtk2go = storage_.load_service("rtk2go");
     const ServiceCredentials onocoy = storage_.load_service("onocoy");
     const ServiceCredentials rtkdata = storage_.load_service("rtkdata");
-    ESP_RETURN_ON_ERROR(
-        rtk2go_.start(
-            storage_.service_enabled("rtk2go"), rtk2go.mountpoint,
-            rtk2go.password),
-        kTag, "RTK2go task failed");
-    ESP_RETURN_ON_ERROR(
-        onocoy_.start(
-            storage_.service_enabled("onocoy"), onocoy.mountpoint,
-            onocoy.password),
-        kTag, "Onocoy task failed");
-    ESP_RETURN_ON_ERROR(
-        rtkdata_.start(
-            storage_.service_enabled("rtkdata"), rtkdata.mountpoint,
-            rtkdata.password),
-        kTag, "RTKdata task failed");
-    ESP_RETURN_ON_ERROR(
-        local_caster_.start(), kTag, "Local caster task failed");
+    esp_err_t err = rtk2go_.start(
+        storage_.service_enabled("rtk2go"), rtk2go.mountpoint,
+        rtk2go.password);
+    if (err != ESP_OK) return cleanup_failed_start(err, "RTK2go task failed");
+
+    err = onocoy_.start(
+        storage_.service_enabled("onocoy"), onocoy.mountpoint,
+        onocoy.password);
+    if (err != ESP_OK) return cleanup_failed_start(err, "Onocoy task failed");
+
+    err = rtkdata_.start(
+        storage_.service_enabled("rtkdata"), rtkdata.mountpoint,
+        rtkdata.password);
+    if (err != ESP_OK) return cleanup_failed_start(err, "RTKdata task failed");
+
+    err = local_caster_.start();
+    if (err != ESP_OK) return cleanup_failed_start(err, "Local caster task failed");
 
     if (xTaskCreatePinnedToCore(
             task_entry, "base_station", 7168, this, 6, &task_, 1) != pdPASS) {
         task_ = nullptr;
-        return ESP_ERR_NO_MEM;
+        return cleanup_failed_start(ESP_ERR_NO_MEM, "Base station task failed");
     }
     return ESP_OK;
 }
 
 void BaseStation::stop() {
-    if (!task_) return;
     stopping_ = true;
     while (task_) vTaskDelay(pdMS_TO_TICKS(10));
     local_caster_.stop();
@@ -130,18 +146,19 @@ void BaseStation::reload_services() {
 }
 
 void BaseStation::set_streams_suspended(bool suspended) {
-    external_suspend_ = suspended;
+    transient_streams_suspended_ = suspended;
     apply_stream_state();
 }
 
 void BaseStation::set_streams_enabled(bool enabled) {
     ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.set_ntrip_streams_enabled(enabled));
-    external_suspend_ = !enabled;
+    user_streams_enabled_ = enabled;
     apply_stream_state();
 }
 
 void BaseStation::apply_persisted_streams() {
-    external_suspend_ = true;  // always start disabled; user re-enables each session
+    user_streams_enabled_ = storage_.ntrip_streams_enabled();
+    transient_streams_suspended_ = false;
     apply_stream_state();
 }
 
@@ -307,10 +324,13 @@ void BaseStation::exit_raw_collection() {
     ESP_LOGI(kTag, "Raw collection mode exited, RTCM restored");
 }
 
+bool BaseStation::effective_streams_suspended() const {
+    return transient_streams_suspended_ || !user_streams_enabled_ ||
+        mode_ != BaseMode::kTransmit || !has_rtcm_data_ || raw_collection_;
+}
+
 void BaseStation::apply_stream_state() {
-    const bool suspended =
-        external_suspend_ || mode_ != BaseMode::kTransmit ||
-        !has_rtcm_data_ || raw_collection_;
+    const bool suspended = effective_streams_suspended();
     local_caster_.set_suspended(suspended);
     rtk2go_.set_suspended(suspended);
     onocoy_.set_suspended(suspended);

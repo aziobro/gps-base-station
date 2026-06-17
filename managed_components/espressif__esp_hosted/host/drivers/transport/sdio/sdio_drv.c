@@ -86,6 +86,8 @@
 #include "esp_hosted_power_save.h"
 #include "esp_hosted_transport_config.h"
 #include "esp_hosted_bt.h"
+#include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "port_esp_hosted_host_config.h"
 #include "esp_hosted_event.h"
 
@@ -154,6 +156,7 @@ static const char TAG[] = "H_SDIO_DRV";
 
 #if defined(USE_DRIVER_LOCK)
 static void * sdio_bus_lock;
+static uint32_t sdio_invalid_arg_log_count;
 
 #define SDIO_DRV_LOCK()   g_h.funcs->_h_lock_mutex(sdio_bus_lock, HOSTED_BLOCK_MAX);
 #define SDIO_DRV_UNLOCK() g_h.funcs->_h_unlock_mutex(sdio_bus_lock);
@@ -197,6 +200,9 @@ static uint32_t sdio_tx_buf_count = 0;
 
 /* Counter to hold the amount of bytes already received from sdio slave */
 static uint32_t sdio_rx_byte_count = 0;
+static uint8_t *sdio_tx_dma_bounce_buf;
+
+#define SDIO_TX_DMA_BOUNCE_SIZE (((MAX_SDIO_BUFFER_SIZE + ESP_BLOCK_SIZE - 1) / ESP_BLOCK_SIZE) * ESP_BLOCK_SIZE)
 
 /* True between "OOM start" and "OOM end" log lines. RX and TX share buf_mp_g,
  * so one flag covers both paths: whichever fails first logs OOM start;
@@ -277,6 +283,35 @@ static inline void *sdio_buffer_alloc(uint need_memset)
 static inline void sdio_buffer_free(void *buf)
 {
 	MEMPOOL_FREE(buf_mp_g, buf);
+}
+
+static int sdio_tx_dma_bounce_create(void)
+{
+	if (sdio_tx_dma_bounce_buf) {
+		return ESP_OK;
+	}
+
+	sdio_tx_dma_bounce_buf = heap_caps_aligned_alloc(HOSTED_MEM_ALIGNMENT_64,
+		SDIO_TX_DMA_BOUNCE_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+	if (!sdio_tx_dma_bounce_buf) {
+		ESP_LOGE(TAG, "failed to allocate SDIO TX DMA bounce buffer (%u bytes)",
+			(unsigned)SDIO_TX_DMA_BOUNCE_SIZE);
+		return ESP_ERR_NO_MEM;
+	}
+	return ESP_OK;
+}
+
+static inline uint8_t *sdio_tx_dma_bounce_prepare(uint8_t *src, uint32_t data_len,
+	uint32_t xfer_len)
+{
+	if (!sdio_tx_dma_bounce_buf || xfer_len > SDIO_TX_DMA_BOUNCE_SIZE) {
+		return NULL;
+	}
+	g_h.funcs->_h_memcpy(sdio_tx_dma_bounce_buf, src, data_len);
+	if (xfer_len > data_len) {
+		g_h.funcs->_h_memset(sdio_tx_dma_bounce_buf + data_len, 0, xfer_len - data_len);
+	}
+	return sdio_tx_dma_bounce_buf;
 }
 
 void bus_deinit_internal(void *bus_handle)
@@ -362,6 +397,11 @@ void bus_deinit_internal(void *bus_handle)
 		sdio_bus_lock = NULL;
 	}
 #endif
+
+	if (sdio_tx_dma_bounce_buf) {
+		heap_caps_free(sdio_tx_dma_bounce_buf);
+		sdio_tx_dma_bounce_buf = NULL;
+	}
 
 	// free memory allocated in double buffering structs
 	if (double_buf.buffer[0].buf) {
@@ -723,6 +763,7 @@ static void sdio_write_task(void const* pvParameters)
 		retries = 0;
 		do {
 			len_to_send = data_left;
+			uint32_t xfer_len = len_to_send;
 
 #if H_SDIO_TX_BLOCK_ONLY_XFER
 			/* Extend the transfer length to do block only transfers.
@@ -730,14 +771,32 @@ static void sdio_write_task(void const* pvParameters)
 			 * is not changed here. Rest of data is discarded by
 			 * slave.
 			 */
-			uint32_t block_send_len = ((len_to_send + ESP_BLOCK_SIZE - 1) / ESP_BLOCK_SIZE) * ESP_BLOCK_SIZE;
-
-			ret = g_h.funcs->_h_sdio_write_block(sdio_handle, ESP_SLAVE_CMD53_END_ADDR - data_left,
-				pos, block_send_len, ACQUIRE_LOCK);
-#else
-			ret = g_h.funcs->_h_sdio_write_block(sdio_handle, ESP_SLAVE_CMD53_END_ADDR - data_left,
-				pos, len_to_send, ACQUIRE_LOCK);
+			xfer_len = ((len_to_send + ESP_BLOCK_SIZE - 1) / ESP_BLOCK_SIZE) * ESP_BLOCK_SIZE;
 #endif
+			uint32_t sdio_addr = ESP_SLAVE_CMD53_END_ADDR - xfer_len;
+			uint8_t *tx_dma_buf = sdio_tx_dma_bounce_prepare(pos, len_to_send, xfer_len);
+			if (!tx_dma_buf) {
+				SDIO_DRV_UNLOCK();
+				ESP_LOGE(TAG, "%s: no SDIO TX DMA buffer; drop pkt if=%u payload_len=%u xfer_len=%lu",
+					__func__, payload_header->if_type, len, (unsigned long)xfer_len);
+				goto done;
+			}
+			ret = g_h.funcs->_h_sdio_write_block(sdio_handle, sdio_addr,
+				tx_dma_buf, xfer_len, ACQUIRE_LOCK);
+
+			if (ret == ESP_ERR_INVALID_ARG) {
+				SDIO_DRV_UNLOCK();
+				if (sdio_invalid_arg_log_count < 8) {
+					sdio_invalid_arg_log_count++;
+					ESP_LOGE(TAG,
+						"%s: invalid SDIO write arg; drop pkt ret=%d if=%u sendbuf=%p pos=%p txbuf=%p addr=0x%lx payload_len=%u data_left=%lu xfer_len=%lu buf_needed=%u",
+						__func__, ret, payload_header->if_type, sendbuf, pos,
+						tx_dma_buf, (unsigned long)sdio_addr, len, (unsigned long)data_left,
+						(unsigned long)xfer_len, buf_needed);
+				}
+				goto done;
+			}
+
 			if (ret) {
 				retries++;
 				if (retries < MAX_SDIO_WRITE_RETRY) {
@@ -1469,6 +1528,9 @@ void *bus_init_internal(void)
 	}
 
 	sdio_mempool_create(tx_queue_size, rx_queue_size);
+	if (sdio_tx_dma_bounce_create() != ESP_OK) {
+		ESP_LOGE(TAG, "continuing without SDIO TX DMA bounce buffer");
+	}
 
 	/* initialise SDMMC before starting read/write threads
 	 * which depend on SDMMC*/

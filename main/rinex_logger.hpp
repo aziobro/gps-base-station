@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,7 @@ private:
 
     std::atomic<bool> active_{false};
     FILE       *file_         = nullptr;
+    mutable std::mutex state_mutex_;
     std::string current_file_;
     int         gps_week_open_ = 0;
     double      tow_open_      = 0.0;

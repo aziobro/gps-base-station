@@ -17,6 +17,7 @@ constexpr size_t kCapacity = 16384;
 char g_ring[kCapacity];
 size_t g_head = 0;    // index of the next byte to write
 size_t g_count = 0;   // bytes currently stored (<= kCapacity)
+uint64_t g_total = 0; // absolute byte cursor for incremental readers
 std::mutex g_mutex;
 vprintf_like_t g_previous = nullptr;
 
@@ -26,6 +27,7 @@ void append(const char *data, size_t length) {
         g_ring[g_head] = data[i];
         g_head = (g_head + 1) % kCapacity;
         if (g_count < kCapacity) ++g_count;
+        ++g_total;
     }
 }
 
@@ -49,15 +51,34 @@ void init() {
 }
 
 std::string snapshot() {
+    return snapshot_since(0).text;
+}
+
+Snapshot snapshot_since(uint64_t since) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_count == 0) return {};
-    const size_t start = (g_count == kCapacity) ? g_head : 0;
-    std::string out;
-    out.reserve(g_count);
-    for (size_t i = 0; i < g_count; ++i) {
-        out.push_back(g_ring[(start + i) % kCapacity]);
+    Snapshot snap;
+    snap.next = g_total;
+    if (g_count == 0 || since == g_total) return snap;
+
+    const uint64_t oldest = g_total - g_count;
+    uint64_t start = since;
+    if (start == 0 || start < oldest) {
+        snap.truncated = since != 0;
+        start = oldest;
+    } else if (start > g_total) {
+        start = g_total;
     }
-    return out;
+
+    const size_t bytes = static_cast<size_t>(g_total - start);
+    if (bytes == 0) return snap;
+
+    const size_t ring_start = (g_count == kCapacity) ? g_head : 0;
+    const size_t offset = static_cast<size_t>(start - oldest);
+    snap.text.reserve(bytes);
+    for (size_t i = 0; i < bytes; ++i) {
+        snap.text.push_back(g_ring[(ring_start + offset + i) % kCapacity]);
+    }
+    return snap;
 }
 
 }  // namespace log_buffer

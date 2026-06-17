@@ -23,8 +23,12 @@ constexpr int kMaxRetryMs = 120000;
 
 NtripPushClient::NtripPushClient(
     const char *label, const char *host, uint16_t port,
-    NtripProtocol protocol)
-    : label_(label), host_(host), port_(port), protocol_(protocol) {}
+    NtripProtocol protocol, uint32_t connect_stagger_ms)
+    : label_(label),
+      host_(host),
+      port_(port),
+      protocol_(protocol),
+      connect_stagger_ms_(connect_stagger_ms) {}
 
 NtripPushClient::~NtripPushClient() {
     stop();
@@ -33,6 +37,7 @@ NtripPushClient::~NtripPushClient() {
 esp_err_t NtripPushClient::start(
     bool enabled, const std::string &mountpoint,
     const std::string &password) {
+    stopping_ = false;
     configure(enabled, mountpoint, password);
     queue_ = xQueueCreate(kQueueDepth, sizeof(Packet));
     if (!queue_) return ESP_ERR_NO_MEM;
@@ -48,10 +53,10 @@ esp_err_t NtripPushClient::start(
 }
 
 void NtripPushClient::stop() {
-    if (!task_) return;
     stopping_ = true;
     reconnect_ = true;
     while (task_) vTaskDelay(pdMS_TO_TICKS(10));
+    close_socket();
     if (queue_) {
         vQueueDelete(queue_);
         queue_ = nullptr;
@@ -72,8 +77,13 @@ void NtripPushClient::configure(
 }
 
 void NtripPushClient::set_suspended(bool suspended) {
-    suspended_ = suspended;
-    if (suspended) reconnect_ = true;
+    const bool was_suspended = suspended_.exchange(suspended);
+    if (suspended) {
+        resumed_us_ = 0;
+        reconnect_ = true;
+    } else if (was_suspended) {
+        resumed_us_ = esp_timer_get_time();
+    }
 }
 
 void NtripPushClient::push(const uint8_t *data, size_t length) {
@@ -136,12 +146,26 @@ void NtripPushClient::run() {
             close_socket();
             if (queue_) xQueueReset(queue_);
             set_message(enabled ? "suspended" : "disabled", false);
+            failures = 0;
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
         if (reconnect_.exchange(false)) {
             close_socket();
             if (queue_) xQueueReset(queue_);
+            failures = 0;
+        }
+        const int64_t resumed = resumed_us_.load();
+        if (resumed > 0 && connect_stagger_ms_ > 0) {
+            const int64_t elapsed = esp_timer_get_time() - resumed;
+            const int64_t target =
+                static_cast<int64_t>(connect_stagger_ms_) * 1000;
+            if (elapsed < target) {
+                set_message("waiting to connect", false);
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
+            resumed_us_ = 0;
         }
         if (socket_ < 0) {
             set_message("connecting", false);

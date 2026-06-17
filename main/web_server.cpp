@@ -1175,7 +1175,7 @@ esp_err_t AdminWebServer::logs_page_handler(httpd_req_t *request) {
 <p class='dim'>Live ESP-IDF console output (most recent ~16 KB). Useful for
 diagnosing NTRIP, WiFi, and SD errors without a serial cable.</p>
 <p>
- <label><input type='checkbox' id='auto' checked style='width:auto'> Auto-refresh (3s)</label>
+ <label><input type='checkbox' id='auto' checked style='width:auto'> Auto-refresh (5s)</label>
  &nbsp; <button type='button' id='refresh'>Refresh now</button>
  &nbsp; <button type='button' id='bottom'>Jump to end</button>
 </p>
@@ -1185,22 +1185,29 @@ diagnosing NTRIP, WiFi, and SD errors without a serial cable.</p>
 <p><a href='/config'>Configuration</a> &nbsp; <a href='/'>Back</a></p>
 <script>
 const pre=document.getElementById('log'),auto=document.getElementById('auto');
-let busy=false;
-async function load(){
+let busy=false,cursor=0;
+async function load(full=false){
  if(busy)return;busy=true;
  try{
-  const r=await fetch('/logs/data',{cache:'no-store'});
+  const r=await fetch(full||!cursor?'/logs/data':'/logs/data?since='+cursor,{cache:'no-store'});
   if(r.ok){
    const atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
-   pre.textContent=await r.text();
+   const text=await r.text(),next=Number(r.headers.get('X-Log-Cursor')||0);
+   const truncated=r.headers.get('X-Log-Truncated')==='1';
+   if(full||!cursor||truncated)pre.textContent=text;
+   else if(text.length){
+    pre.textContent+=text;
+    if(pre.textContent.length>16384)pre.textContent=pre.textContent.slice(-16384);
+   }
+   if(next)cursor=next;
    if(atEnd)pre.scrollTop=pre.scrollHeight;
   }
  }catch(e){}finally{busy=false;}
 }
-document.getElementById('refresh').onclick=load;
+document.getElementById('refresh').onclick=()=>load(true);
 document.getElementById('bottom').onclick=()=>{pre.scrollTop=pre.scrollHeight;};
-load().then(()=>{pre.scrollTop=pre.scrollHeight;});
-setInterval(()=>{if(auto.checked)load();},3000);
+load(true).then(()=>{pre.scrollTop=pre.scrollHeight;});
+setInterval(()=>{if(auto.checked)load();},5000);
 </script>)HTML";
     return server->send_page(request, "Console Logs", content);
 }
@@ -1208,10 +1215,20 @@ setInterval(()=>{if(auto.checked)load();},3000);
 esp_err_t AdminWebServer::logs_data_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
-    const std::string logs = log_buffer::snapshot();
+    uint64_t since = 0;
+    const std::string since_param = query_param(request, "since");
+    if (!since_param.empty()) {
+        since = strtoull(since_param.c_str(), nullptr, 10);
+    }
+    const log_buffer::Snapshot logs = log_buffer::snapshot_since(since);
+    char cursor[24];
+    snprintf(cursor, sizeof(cursor), "%llu",
+             static_cast<unsigned long long>(logs.next));
     httpd_resp_set_type(request, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, logs.c_str(), logs.size());
+    httpd_resp_set_hdr(request, "X-Log-Cursor", cursor);
+    httpd_resp_set_hdr(request, "X-Log-Truncated", logs.truncated ? "1" : "0");
+    return httpd_resp_send(request, logs.text.c_str(), logs.text.size());
 }
 
 bool AdminWebServer::authorize(httpd_req_t *request) const {
