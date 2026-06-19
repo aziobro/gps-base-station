@@ -6,7 +6,7 @@
 - [project_display](project_display.md) — Display/touch implementation decisions
 
 ## Build & Deploy
-- [project_build_deploy](project_build_deploy.md) — build (./idf.sh), OTA/USB flash, release.sh, bootstrap recovery, config.env, git push
+- [project_build_deploy](project_build_deploy.md) — build (./idf.sh · Windows idf.ps1), OTA/USB flash, release.sh · release.ps1, bootstrap recovery, config.env, git push
 
 ## Networking & Web
 - [project_ntrip](project_ntrip.md) — NTRIP push flow, reconnect-storm root cause + fix, diagnostics

@@ -32,8 +32,17 @@ src/secrets.h
 # Machine-specific build/deploy config (copy from config.sample.env)
 config.env
 
-# Device-local HTTPS credentials (generate with tools/generate-https-certs.sh)
+# Machine-specific Windows build/deploy config (copy from config.win.sample.ps1)
+config.win.ps1
+
+# Per-machine VS Code settings (absolute ESP-IDF / toolchain paths)
+.vscode/settings.json
+
+# Device-local HTTPS credentials + cert-generation byproducts
 main/certs/*.pem
+main/certs/*.srl
+main/certs/*.csr
+main/certs/*.cnf
 
 # Bootstrap recovery firmware — generated lockfile and cert symlinks into main/certs/
 bootstrap/dependencies.lock

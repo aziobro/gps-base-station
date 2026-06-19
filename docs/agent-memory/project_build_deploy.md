@@ -73,3 +73,25 @@ Must be raw `application/octet-stream` (NOT `curl -F` multipart → ESP_ERR_OTA_
 ## HTTPS cert note
 - `tools/generate-https-certs.sh` SAN is now parameterized via config.env (`CERT_DNS`/`CERT_IP`/`CERT_AP_IP`), default `gps-base.local` + `192.168.8.186` + `192.168.4.1`.
 - Existing embedded cert still has the old `192.168.8.195`; regenerate certs (then rebuild + re-trust CA) to pick up the corrected IP. Access via `gps-base.local` is IP-independent regardless.
+
+## Windows (PowerShell) build & deploy
+On Windows the bash scripts above don't apply (`idf.sh`/`release.sh` hardcode `~/.espressif`, `/dev/tty.*`, and `source export.sh`). Use the PowerShell equivalents `idf.ps1` and `tools/release.ps1` (added June 2026 after the macOS→Windows move).
+- **ESP-IDF v6.0.1** installed via the ESP-IDF Installation Manager (EIM): framework at `C:\esp\v6.0.1\esp-idf` (recorded in `%USERPROFILE%\.espressif\idf-env.json`), tools under `%USERPROFILE%\.espressif`, Python 3.12. Target `esp32p4`.
+- PowerShell does **not** persist shell state between commands, so each wrapper activates IDF (dot-sources `export.ps1`) in the same process it runs `idf.py`.
+- **Build / flash:**
+  ```powershell
+  .\idf.ps1 build                              # build
+  $env:PORT='COM5'; .\idf.ps1 flash monitor    # USB flash + monitor (port via $env:PORT or config.win.ps1)
+  .\idf.ps1 fullclean                          # clean
+  ```
+- **Release (bump → build → verify binary → push → verify on device):**
+  ```powershell
+  .\tools\release.ps1 build                                       # bump+build+verify binary, no device
+  $env:ADMIN_PASSWORD='itfloats'; .\tools\release.ps1 ota 192.168.8.186          # +OTA+poll /status
+  .\tools\release.ps1 ota 192.168.8.186 2026.06.12-ota94          # explicit version (skip auto-bump)
+  ```
+  The device already runs `ota93`, so a real deploy must bump to **ota94 or higher** — `/status` verification can't confirm a re-flash of the same version.
+- **config.win.ps1** (git-ignored; copy from `config.win.sample.ps1`): `$IdfPath`, `$SerialPort`, `$DeviceHost`, `$AdminUser`, `$AdminPassword`. A caller env var (`$env:PORT`, `$env:DEVICE_HOST`, `$env:ADMIN_PASSWORD`, …) overrides it.
+- **Execution policy:** if scripts are blocked, launch with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\release.ps1 ota 192.168.8.186`, or once per user `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+- **curl:** use `curl.exe` (real curl, in `System32`) for OTA / `/status` — a bare `curl` in PowerShell is an alias for `Invoke-WebRequest`.
+- **Gotcha — moving/renaming the project folder:** CMake bakes absolute paths into `build/CMakeCache.txt`. After a move or rename (e.g. removing spaces: `GPS Base Station` → `GPSBaseStation`), delete the build dir before rebuilding (`Remove-Item -Recurse -Force build`), or cmake fails with "The current CMakeCache.txt directory … is different".
