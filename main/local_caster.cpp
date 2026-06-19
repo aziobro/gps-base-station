@@ -14,6 +14,26 @@ namespace {
 
 constexpr char kTag[] = "local_caster";
 
+uint32_t peer_ipv4(const sockaddr_storage &source) {
+    if (source.ss_family != AF_INET) return 0;
+    const auto *addr = reinterpret_cast<const sockaddr_in *>(&source);
+    return addr->sin_addr.s_addr;
+}
+
+void ipv4_to_text(uint32_t ipv4, char *output, size_t output_size) {
+    if (output_size == 0) return;
+    if (!ipv4) {
+        snprintf(output, output_size, "unknown");
+        return;
+    }
+    const uint32_t host = ntohl(ipv4);
+    snprintf(output, output_size, "%u.%u.%u.%u",
+             static_cast<unsigned>((host >> 24) & 0xff),
+             static_cast<unsigned>((host >> 16) & 0xff),
+             static_cast<unsigned>((host >> 8) & 0xff),
+             static_cast<unsigned>(host & 0xff));
+}
+
 }  // namespace
 
 LocalCaster::~LocalCaster() {
@@ -59,6 +79,16 @@ void LocalCaster::push(const uint8_t *data, size_t length) {
 
 int LocalCaster::client_count() const {
     return client_count_;
+}
+
+LocalCaster::ClientSnapshot LocalCaster::client_snapshot() const {
+    ClientSnapshot snapshot{};
+    for (const auto &ipv4 : client_ipv4_) {
+        const uint32_t value = ipv4.load(std::memory_order_relaxed);
+        if (!value) continue;
+        snapshot.ipv4[snapshot.count++] = value;
+    }
+    return snapshot;
 }
 
 void LocalCaster::task_entry(void *argument) {
@@ -163,27 +193,36 @@ void LocalCaster::accept_client() {
         return;
     }
     clients_[slot] = incoming;
+    client_ipv4_[slot].store(peer_ipv4(source), std::memory_order_relaxed);
     recount_clients();
+    char ip_text[16];
+    ipv4_to_text(client_ipv4_[slot].load(std::memory_order_relaxed),
+                 ip_text, sizeof(ip_text));
+    ESP_LOGI(kTag, "Client %d connected from %s", slot, ip_text);
 }
 
 void LocalCaster::broadcast(const Packet &packet) {
-    for (int &client : clients_) {
+    for (int i = 0; i < kMaxClients; ++i) {
+        int &client = clients_[i];
         if (client >= 0 && !send_all(client, packet.data, packet.length)) {
             shutdown(client, SHUT_RDWR);
             close(client);
             client = -1;
+            client_ipv4_[i].store(0, std::memory_order_relaxed);
         }
     }
     recount_clients();
 }
 
 void LocalCaster::close_clients() {
-    for (int &client : clients_) {
+    for (int i = 0; i < kMaxClients; ++i) {
+        int &client = clients_[i];
         if (client >= 0) {
             shutdown(client, SHUT_RDWR);
             close(client);
             client = -1;
         }
+        client_ipv4_[i].store(0, std::memory_order_relaxed);
     }
     recount_clients();
 }

@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 
 namespace {
 
@@ -64,6 +65,46 @@ constexpr uint32_t kDimCol    = 0x3a5570;
 // Maximum characters of log tail to render in the Debug label (keeps the LVGL
 // label light; the full history is available on the web /logs page).
 constexpr size_t kDebugTailChars = 4000;
+
+void ipv4_to_text(uint32_t ipv4, char *output, size_t output_size) {
+    if (output_size == 0) return;
+    if (!ipv4) {
+        snprintf(output, output_size, "unknown");
+        return;
+    }
+    const uint32_t host = ntohl(ipv4);
+    snprintf(output, output_size, "%u.%u.%u.%u",
+             static_cast<unsigned>((host >> 24) & 0xff),
+             static_cast<unsigned>((host >> 16) & 0xff),
+             static_cast<unsigned>((host >> 8) & 0xff),
+             static_cast<unsigned>(host & 0xff));
+}
+
+void local_client_ips_to_text(
+    const LocalCaster::ClientSnapshot &clients,
+    char *output, size_t output_size) {
+    if (output_size == 0) return;
+    if (clients.count == 0) {
+        snprintf(output, output_size, "\xe2\x80\x94");
+        return;
+    }
+
+    output[0] = '\0';
+    size_t used = 0;
+    for (int i = 0; i < clients.count && used < output_size; ++i) {
+        char ip[16];
+        ipv4_to_text(clients.ipv4[i], ip, sizeof(ip));
+        const int written = snprintf(
+            output + used, output_size - used,
+            "%s%s", i ? ", " : "", ip);
+        if (written < 0) break;
+        if (static_cast<size_t>(written) >= output_size - used) {
+            output[output_size - 1] = '\0';
+            break;
+        }
+        used += static_cast<size_t>(written);
+    }
+}
 
 } // namespace
 
@@ -363,6 +404,7 @@ void Ui::build_status_tab(lv_obj_t *parent) {
     make_row(g_ntrip, &lbl_onocoy_,      "Onocoy");
     make_row(g_ntrip, &lbl_rtkdata_,     "RTKdata");
     make_row(g_ntrip, &lbl_local_ntrip_, "Local :2101");
+    make_row(g_ntrip, &lbl_local_ntrip_ips_, "Client IPs");
 }
 
 // ── NTRIP tab ─────────────────────────────────────────────────────────────────
@@ -470,6 +512,7 @@ void Ui::build_ntrip_tab(lv_obj_t *parent) {
 
     lv_obj_t *g_local = make_group(parent, "LOCAL CASTER :2101");
     make_row(g_local, &lbl_d_local_ntrip_, "Clients");
+    make_row(g_local, &lbl_d_local_ntrip_ips_, "Client IPs");
 }
 
 // ── Position tab ──────────────────────────────────────────────────────────────
@@ -1423,6 +1466,12 @@ void Ui::refresh() {
         st.local_clients > 0
             ? lv_palette_main(LV_PALETTE_GREEN)
             : lv_color_hex(kDimCol), 0);
+    local_client_ips_to_text(st.local_client_ips, buf, sizeof(buf));
+    lv_label_set_text(lbl_local_ntrip_ips_, buf);
+    lv_obj_set_style_text_color(lbl_local_ntrip_ips_,
+        st.local_clients > 0
+            ? lv_palette_main(LV_PALETTE_GREEN)
+            : lv_color_hex(kDimCol), 0);
 
     // ── NTRIP tab: detailed ───────────────────────────────────────────────────
     auto update_ntrip_detail = [&](const NtripStatus &ns,
@@ -1460,6 +1509,12 @@ void Ui::refresh() {
              st.local_clients, st.local_clients == 1 ? "" : "s");
     lv_label_set_text(lbl_d_local_ntrip_, buf);
     lv_obj_set_style_text_color(lbl_d_local_ntrip_,
+        st.local_clients > 0
+            ? lv_palette_main(LV_PALETTE_GREEN)
+            : lv_color_hex(kDimCol), 0);
+    local_client_ips_to_text(st.local_client_ips, buf, sizeof(buf));
+    lv_label_set_text(lbl_d_local_ntrip_ips_, buf);
+    lv_obj_set_style_text_color(lbl_d_local_ntrip_ips_,
         st.local_clients > 0
             ? lv_palette_main(LV_PALETTE_GREEN)
             : lv_color_hex(kDimCol), 0);

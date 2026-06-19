@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 
 #include "esp_err.h"
@@ -10,6 +11,13 @@
 
 class LocalCaster {
 public:
+    static constexpr int kMaxClients = 8;
+
+    struct ClientSnapshot {
+        int count = 0;
+        std::array<uint32_t, kMaxClients> ipv4{};
+    };
+
     ~LocalCaster();
 
     esp_err_t start();
@@ -17,11 +25,11 @@ public:
     void set_suspended(bool suspended);
     void push(const uint8_t *data, size_t length);
     int client_count() const;
+    ClientSnapshot client_snapshot() const;
 
 private:
     static constexpr size_t kMaxPacket = 1024;
     static constexpr int kQueueDepth = 12;
-    static constexpr int kMaxClients = 8;
     struct Packet {
         uint16_t length;
         uint8_t data[kMaxPacket];
@@ -33,6 +41,7 @@ private:
     std::atomic<bool> suspended_{true};
     std::atomic<bool> reset_clients_{false};
     std::atomic<int> client_count_{0};
+    std::array<std::atomic<uint32_t>, kMaxClients> client_ipv4_{};
     int listener_ = -1;
     int clients_[kMaxClients] = {-1, -1, -1, -1, -1, -1, -1, -1};
 

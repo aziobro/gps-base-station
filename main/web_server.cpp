@@ -152,6 +152,40 @@ std::string uptime_str(uint64_t seconds) {
     return text;
 }
 
+std::string ipv4_to_string(uint32_t ipv4) {
+    if (!ipv4) return {};
+    const uint32_t host = ntohl(ipv4);
+    char text[16];
+    snprintf(text, sizeof(text), "%u.%u.%u.%u",
+             static_cast<unsigned>((host >> 24) & 0xff),
+             static_cast<unsigned>((host >> 16) & 0xff),
+             static_cast<unsigned>((host >> 8) & 0xff),
+             static_cast<unsigned>(host & 0xff));
+    return text;
+}
+
+std::string local_client_ips_html(
+    const LocalCaster::ClientSnapshot &clients) {
+    if (clients.count == 0) return "<span class='dim'>none</span>";
+    std::string out;
+    for (int i = 0; i < clients.count; ++i) {
+        if (i) out += ", ";
+        out += ipv4_to_string(clients.ipv4[i]);
+    }
+    return out;
+}
+
+std::string local_client_ips_json(
+    const LocalCaster::ClientSnapshot &clients) {
+    std::string out = "[";
+    for (int i = 0; i < clients.count; ++i) {
+        if (i) out += ",";
+        out += "\"" + ipv4_to_string(clients.ipv4[i]) + "\"";
+    }
+    out += "]";
+    return out;
+}
+
 
 std::string escape_html(const std::string &value) {
     std::string out;
@@ -489,6 +523,8 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         " total</span></td></tr>"
         "<tr><td>Local NTRIP clients</td><td id='st-clients'>" +
         std::to_string(station.local_clients) + "</td></tr>"
+        "<tr><td>Local NTRIP client IPs</td><td id='st-client-ips'>" +
+        local_client_ips_html(station.local_client_ips) + "</td></tr>"
         "<tr><td>NTRIP push</td><td id='st-ntrip'>" +
         [&]() {
             const bool en = server->station_->streams_enabled();
@@ -554,6 +590,7 @@ function bytes(v){return v>=1048576?(v/1048576).toFixed(1)+' MB':v>=1024?(v/1024
 function set(id,v){const e=document.getElementById(id);if(e)e.innerHTML=v;}
 function upt(s){s=s|0;var d=(s/86400)|0,h=((s%86400)/3600)|0,m=((s%3600)/60)|0,x=s%60,p=n=>String(n).padStart(2,'0');return(d?d+'d ':'')+p(h)+':'+p(m)+':'+p(x);}
 function svc(p){if(!p.enabled)return "<span class='warn'>disabled</span>";const c=p.connected?'ok':'err',m=p.connected?("connected <span class='dim'>("+upt(p.connected_sec)+")</span>"):esc(p.message);var d="<span class='"+c+"'>"+m+"</span> <span class='dim'>| "+bytes(p.bytes)+" sent | "+p.dropped+" dropped";if(p.reconnects)d+=" | "+p.reconnects+" reconnects";if(p.ever_sent)d+=" | last data "+p.last_send_age+"s ago";d+="</span>";if(!p.connected&&p.last_error)d+=" <span class='err' style='font-size:0.85em'>"+esc(p.last_error)+"</span>";return d;}
+function ips(a){return a&&a.length?esc(a.join(', ')):"<span class='dim'>none</span>";}
 async function refresh(){
  if(statusRequest)return;statusRequest=true;
  try{
@@ -573,7 +610,7 @@ async function refresh(){
   set('st-survey',sv);
   set('st-sats','GPS '+d.gps+' / GLO '+d.glonass+' / GAL '+d.galileo+' / BDS '+d.beidou+" <span class='dim'>| total "+total+"</span>");
   set('st-rtcm',d.rtcm_bps+" B/s <span class='dim'>| "+bytes(d.rtcm_total)+" total</span>");
-  set('st-clients',d.local_clients);set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
+  set('st-clients',d.local_clients);set('st-client-ips',ips(d.local_client_ips));set('st-r2g',svc(d.rtk2go));set('st-onc',svc(d.onocoy));set('st-rtk',svc(d.rtkdata));
   set('st-ntrip',(d.ntrip_enabled?"<span class='ok'>enabled</span>":"<span class='warn'>disabled</span>")+" &nbsp; <button onclick=\"toggleNtrip("+(d.ntrip_enabled?'false':'true')+")\">"+(d.ntrip_enabled?'Disable':'Enable')+"</button>");
   const hp=Math.round(d.free_heap*100/d.heap_total),hc=hp>=40?'ok':hp>=20?'warn':'err';
   set('st-heap',"<span class='"+hc+"'>"+bytes(d.free_heap)+" ("+hp+"% free)</span> <span class='dim'>| low watermark "+bytes(d.min_free_heap)+"</span>");
@@ -895,6 +932,8 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"beidou\":" + std::to_string(station.survey.beidou) +
         std::string(survey_json) +
         ",\"local_clients\":" + std::to_string(station.local_clients) +
+        ",\"local_client_ips\":" +
+        local_client_ips_json(station.local_client_ips) +
         ",\"ntrip_enabled\":" +
         (server->station_->streams_enabled() ? "true" : "false") +
         ",\"rtk2go\":" + provider_json(station.rtk2go) +

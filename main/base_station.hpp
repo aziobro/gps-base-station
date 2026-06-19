@@ -29,6 +29,7 @@ struct BaseStationStatus {
     NtripStatus onocoy;
     NtripStatus rtkdata;
     int local_clients = 0;
+    LocalCaster::ClientSnapshot local_client_ips;
     uint32_t rtcm_bytes_per_second = 0;
     uint64_t rtcm_bytes_total = 0;
 };

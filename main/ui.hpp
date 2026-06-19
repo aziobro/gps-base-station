@@ -47,6 +47,7 @@ private:
     lv_obj_t *lbl_onocoy_       = nullptr;
     lv_obj_t *lbl_rtkdata_      = nullptr;
     lv_obj_t *lbl_local_ntrip_  = nullptr;
+    lv_obj_t *lbl_local_ntrip_ips_ = nullptr;
 
     // ── NTRIP tab ─────────────────────────────────────────────────────────────
     lv_obj_t *sw_ntrip_all_        = nullptr;
@@ -63,6 +64,7 @@ private:
     lv_obj_t *lbl_d_rtkdata_drop_  = nullptr;
     lv_obj_t *lbl_d_rtkdata_recon_ = nullptr;
     lv_obj_t *lbl_d_local_ntrip_   = nullptr;
+    lv_obj_t *lbl_d_local_ntrip_ips_ = nullptr;
 
     // ── Position tab ──────────────────────────────────────────────────────────
     lv_obj_t *lbl_d_lat_        = nullptr;

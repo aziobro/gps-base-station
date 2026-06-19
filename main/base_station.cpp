@@ -168,16 +168,17 @@ bool BaseStation::healthy() const {
 }
 
 BaseStationStatus BaseStation::status() const {
-    return {
-        mode_,
-        survey_.snapshot(),
-        rtk2go_.status(),
-        onocoy_.status(),
-        rtkdata_.status(),
-        local_caster_.client_count(),
-        rtcm_bps_,
-        rtcm_total_,
-    };
+    BaseStationStatus status{};
+    status.mode = mode_.load(std::memory_order_relaxed);
+    status.survey = survey_.snapshot();
+    status.rtk2go = rtk2go_.status();
+    status.onocoy = onocoy_.status();
+    status.rtkdata = rtkdata_.status();
+    status.local_client_ips = local_caster_.client_snapshot();
+    status.local_clients = status.local_client_ips.count;
+    status.rtcm_bytes_per_second = rtcm_bps_.load(std::memory_order_relaxed);
+    status.rtcm_bytes_total = rtcm_total_.load(std::memory_order_relaxed);
+    return status;
 }
 
 size_t BaseStation::satellites(
