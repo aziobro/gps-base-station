@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "app_config.hpp"
@@ -133,18 +134,16 @@ bool WifiManager::access_point_active() const {
 
 int WifiManager::rssi() const {
     if (!connected_) return -127;
-    wifi_ap_record_t record{};
-    if (esp_wifi_sta_get_ap_info(&record) != ESP_OK) return -127;
-    return record.rssi;
+    std::lock_guard<std::mutex> lock(ap_info_mutex_);
+    return cached_valid_ ? cached_rssi_ : -127;
 }
 
 std::string WifiManager::ssid() const {
     if (!connected_) {
         return access_point_active_ ? config::kAccessPointSsid : "";
     }
-    wifi_ap_record_t record{};
-    if (esp_wifi_sta_get_ap_info(&record) != ESP_OK) return {};
-    return reinterpret_cast<const char *>(record.ssid);
+    std::lock_guard<std::mutex> lock(ap_info_mutex_);
+    return cached_valid_ ? std::string(cached_ssid_) : std::string();
 }
 
 std::string WifiManager::ip_address() const {
@@ -273,9 +272,47 @@ void WifiManager::recovery_task_entry(void *arg) {
     vTaskDelete(nullptr);
 }
 
+void WifiManager::refresh_ap_info() {
+    // Link down: drop the cache and arm an immediate refresh for the next
+    // association, so a fast reconnect doesn't serve a stale/blank value.
+    if (!connected_) {
+        ap_info_last_ms_ = 0;
+        std::lock_guard<std::mutex> lock(ap_info_mutex_);
+        cached_valid_ = false;
+        return;
+    }
+
+    const int64_t now = now_ms();
+    const int64_t last = ap_info_last_ms_;
+    if (last != 0 && now - last < kApInfoRefreshMs) {
+        return;  // throttle: at most one SDIO RPC per kApInfoRefreshMs
+    }
+    ap_info_last_ms_ = now;
+
+    // The single blocking RPC — deliberately OUTSIDE the lock so a slow or
+    // contended C6 round-trip never stalls a UI/httpd reader.
+    wifi_ap_record_t record{};
+    const bool ok = esp_wifi_sta_get_ap_info(&record) == ESP_OK;
+
+    std::lock_guard<std::mutex> lock(ap_info_mutex_);
+    if (ok) {
+        cached_rssi_ = record.rssi;
+        // record.ssid holds up to 32 bytes and may not be NUL-terminated at
+        // 32; bound the source read explicitly instead of strlcpy-ing past it.
+        memcpy(cached_ssid_, record.ssid, 32);
+        cached_ssid_[32] = '\0';
+        cached_valid_ = true;
+    }
+    // On RPC failure keep the last good value (transient SDIO contention).
+}
+
 void WifiManager::recovery_loop() {
     while (!stopping_) {
         const int64_t now = now_ms();
+
+        // Keep the cached STA SSID/RSSI fresh (self-throttled) so the UI and
+        // web hot paths read the cache instead of issuing blocking SDIO RPCs.
+        refresh_ap_info();
 
         // Connected and AP is up: switch back to STA-only mode.
         if (disable_ap_pending_) {

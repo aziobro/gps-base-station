@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,7 @@ private:
     static constexpr EventBits_t kConnectedBit = BIT0;
     static constexpr uint32_t kRetryIntervalMs = 10000;   // station re-association retry
     static constexpr int64_t  kApFallbackMs    = 120000;  // raise SoftAP after 2 min offline
+    static constexpr int64_t  kApInfoRefreshMs = 5000;    // throttle esp_wifi_sta_get_ap_info cache
 
     Storage *storage_ = nullptr;
     EventGroupHandle_t events_ = nullptr;
@@ -71,6 +73,16 @@ private:
     std::atomic<int64_t> last_retry_ms_{0};
     std::atomic<bool> stopping_{false};
 
+    // Cached STA association info, refreshed by recovery_loop at most every
+    // kApInfoRefreshMs so rssi()/ssid() never issue a blocking SDIO RPC on the
+    // LVGL/httpd hot paths. cached_* are guarded by ap_info_mutex_ (the SSID is
+    // a fixed buffer because std::string tears under concurrent read/write).
+    mutable std::mutex ap_info_mutex_;
+    char cached_ssid_[33] = {};   // up to 32-byte SSID + NUL
+    int cached_rssi_ = -127;
+    bool cached_valid_ = false;   // true once a successful RPC has populated it
+    std::atomic<int64_t> ap_info_last_ms_{0};  // 0 = refresh on next tick (boot / post-disconnect)
+
     static void event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data);
     static void recovery_task_entry(void *arg);
@@ -78,6 +90,9 @@ private:
     void handle_event(esp_event_base_t event_base, int32_t event_id,
                       void *event_data);
     void recovery_loop();
+    // Refresh cached STA SSID/RSSI via one esp_wifi_sta_get_ap_info() RPC,
+    // throttled to kApInfoRefreshMs. Called only from recovery_loop.
+    void refresh_ap_info();
 
     esp_err_t configure_station(const WifiCredentials &credentials);
     // Fills the SoftAP half of a wifi_config_t from the shared SSID constant
