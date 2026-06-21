@@ -13,3 +13,6 @@
 
 ## RINEX / Post-processing
 - [project_rinex](project_rinex.md) — signal→band classification, Unicore UM980 signal codes, antenna metadata, OPUS/CSRS-PPP
+
+## Reliability
+- [project_wifi_rpc_crash](project_wifi_rpc_crash.md) — IWDT crash from UI/web blocking esp_wifi_sta_get_ap_info RPC to the C6; fixed + confirmed in ota95 by caching ssid/rssi
