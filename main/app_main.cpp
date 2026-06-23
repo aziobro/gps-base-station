@@ -9,6 +9,7 @@
 #include "esp_system.h"
 #include "log_buffer.hpp"
 #include "nvs_flash.h"
+#include "sd_delete.hpp"
 #include "sd_manager.hpp"
 #include "storage.hpp"
 #include "ui.hpp"
@@ -171,6 +172,9 @@ extern "C" void app_main() {
     } else {
         ESP_LOGW(kTag, "SD card not available — file browser will show empty state");
     }
+
+    // Wire the shared single-job bulk-delete executor (used by both UIs).
+    sd_delete::bind(&sd_manager, &base_station);
 
     static Display display;
     if (display.init() == ESP_OK) {

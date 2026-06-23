@@ -7,6 +7,7 @@ idf_component_register(
         "log_buffer.cpp"
         "ntrip_push.cpp"
         "rinex_logger.cpp"
+        "sd_delete.cpp"
         "sd_manager.cpp"
         "storage.cpp"
         "survey.cpp"

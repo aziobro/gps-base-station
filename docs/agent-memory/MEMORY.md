@@ -7,6 +7,7 @@
 
 ## Build & Deploy
 - [project_build_deploy](project_build_deploy.md) — build (./idf.sh · Windows idf.ps1), OTA/USB flash, release.sh · release.ps1, bootstrap recovery, config.env, git push
+- [project_deploy_test](project_deploy_test.md) — deploy + verify runbook: OTA via web, USB recovery flash from the monitoring Pi (esptool over /dev/ttyACM0), how to confirm a build landed + is crash-free
 
 ## Networking & Web
 - [project_ntrip](project_ntrip.md) — NTRIP push flow, reconnect-storm root cause + fix, diagnostics

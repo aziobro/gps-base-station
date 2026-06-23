@@ -38,6 +38,11 @@ CONFIG_LV_OS_FREERTOS=y
 # Route all LVGL allocations to PSRAM — the 64 KB built-in pool is too small
 # for complex UI widgets (keyboard + modals + file browser).
 CONFIG_LV_USE_CUSTOM_MALLOC=y
+# Large numeric readout fonts for the marine-instrument UI (value/hero sizes).
+# These cost flash .rodata only — NOT the scarce internal SRAM. 14 stays the default.
+CONFIG_LV_FONT_MONTSERRAT_18=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_LWIP_MAX_SOCKETS=32
 # Larger TCP window so the high-RTT SoftAP path (single-radio APSTA time-shares

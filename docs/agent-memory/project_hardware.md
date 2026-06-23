@@ -33,6 +33,6 @@ ESP32-P4-WIFI6-Touch-LCD-4B (Waveshare)
 
 ## OTA / Flashing
 - Device IP (when on network): 192.168.8.186
-- Admin password: itfloats
+- Admin password: <admin-pw>
 - Flash via USB: idf.py -p /dev/tty.usbmodem* flash monitor
-- OTA command: ADMIN_PASSWORD=itfloats bash tools/release.sh ota 192.168.8.186
+- OTA command: ADMIN_PASSWORD=<admin-pw> bash tools/release.sh ota 192.168.8.186

@@ -9,6 +9,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <string>
+#include <vector>
+
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "esp_log.h"
@@ -63,6 +67,14 @@ bool buf_append_json_str(char **buf, size_t *len, size_t *cap, const char *s) {
         if (!buf_append(buf, len, cap, esc, 2)) return false;
     }
     return true;
+}
+
+// Record one failed entry into a DeleteResult (captures errno on the first failure).
+void note_fail(SdManager::DeleteResult &res, const char *path) {
+    res.failed++;
+    if (res.first_error[0] == '\0') {
+        snprintf(res.first_error, sizeof(res.first_error), "%s: errno %d", path, errno);
+    }
 }
 
 }  // namespace
@@ -225,6 +237,12 @@ char *SdManager::list_dir(const char *path) const {
 
 bool SdManager::delete_entry(const char *path) const {
     if (!mounted_ || !path) return false;
+    // Even the legacy single-item path is guarded so a protected entry can't be
+    // removed. (Only files / empty dirs here; recursion goes through delete_recursive.)
+    if (check_deletable(path) != DeleteGuard::kAllowed) {
+        ESP_LOGW(kTag, "delete_entry refused (protected/bad): %s", path);
+        return false;
+    }
     struct stat st;
     if (stat(path, &st) != 0) return false;
     int r = S_ISDIR(st.st_mode) ? rmdir(path) : unlink(path);
@@ -253,4 +271,193 @@ void SdManager::ensure_dirs() const {
             ESP_LOGW(kTag, "mkdir %s failed: errno %d", path, errno);
         }
     }
+}
+
+// ── Bulk / recursive delete ─────────────────────────────────────────────────────
+
+SdManager::DeleteGuard SdManager::check_deletable(const char *path) {
+    if (!safe_path(path)) return DeleteGuard::kBadPath;
+
+    // Normalize: ignore a single trailing slash (except the mount root itself).
+    char norm[260];
+    snprintf(norm, sizeof(norm), "%s", path);
+    const size_t len = strlen(norm);
+    const size_t mp  = strlen(kMountPoint);
+    if (len > mp && norm[len - 1] == '/') norm[len - 1] = '\0';
+
+    if (strcmp(norm, kMountPoint) == 0) return DeleteGuard::kMountRoot;
+
+    char managed[64];
+    snprintf(managed, sizeof(managed), "%s/logs", kMountPoint);
+    if (strcmp(norm, managed) == 0) return DeleteGuard::kManagedDir;
+    snprintf(managed, sizeof(managed), "%s/rawdata", kMountPoint);
+    if (strcmp(norm, managed) == 0) return DeleteGuard::kManagedDir;
+
+    return DeleteGuard::kAllowed;
+}
+
+bool SdManager::is_deletable(const char *path) const {
+    if (!mounted_) return false;
+    if (check_deletable(path) != DeleteGuard::kAllowed) return false;
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+void SdManager::preview_walk(const char *path, DeletePreview &pv) const {
+    if (pv.files + pv.dirs >= kPreviewWalkCap) { pv.truncated = true; return; }
+
+    struct stat st;
+    if (stat(path, &st) != 0) return;
+
+    if (S_ISDIR(st.st_mode)) {
+        std::vector<std::string> names;
+        DIR *d = opendir(path);
+        if (!d) return;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+            names.emplace_back(ent->d_name);
+        }
+        closedir(d);
+        for (const std::string &name : names) {
+            if (pv.files + pv.dirs >= kPreviewWalkCap) { pv.truncated = true; break; }
+            std::string child = std::string(path) + "/" + name;
+            preview_walk(child.c_str(), pv);
+        }
+        pv.dirs++;  // this directory's own shell
+    } else {
+        pv.files++;
+        pv.bytes += static_cast<uint64_t>(st.st_size);
+    }
+}
+
+SdManager::DeletePreview SdManager::preview_delete(const char *path) const {
+    DeletePreview pv;
+    if (!mounted_ || !path) return pv;
+    struct stat st;
+    if (stat(path, &st) != 0) return pv;  // ok stays false (not found)
+    preview_walk(path, pv);
+    // A managed dir is emptied but its shell is kept — don't count the shell.
+    if (S_ISDIR(st.st_mode) &&
+        check_deletable(path) == DeleteGuard::kManagedDir && pv.dirs > 0) {
+        pv.dirs--;
+    }
+    pv.ok = true;
+    return pv;
+}
+
+SdManager::DeletePreview SdManager::preview_delete_many(
+    const char *const *paths, size_t n) const {
+    DeletePreview total;
+    if (!mounted_ || !paths) return total;
+    for (size_t i = 0; i < n; ++i) {
+        if (!paths[i]) continue;
+        if (total.files + total.dirs >= kPreviewWalkCap) { total.truncated = true; break; }
+        DeletePreview one = preview_delete(paths[i]);
+        if (!one.ok) continue;
+        total.files += one.files;
+        total.dirs  += one.dirs;
+        total.bytes += one.bytes;
+        if (one.truncated) total.truncated = true;
+    }
+    total.ok = true;
+    return total;
+}
+
+void SdManager::remove_tree(std::string &path, bool keep_shell,
+                            DeleteResult &res, std::atomic<uint32_t> *progress) const {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) { note_fail(res, path.c_str()); return; }
+
+    if (S_ISDIR(st.st_mode)) {
+        // Defense in depth: re-validate every directory path before recursing.
+        if (!safe_path(path.c_str())) { res.skipped++; return; }
+
+        // Snapshot child names, then CLOSE the handle before recursing so we never
+        // hold more than one DIR open at a time (FATFS max_files is small).
+        std::vector<std::string> names;
+        DIR *d = opendir(path.c_str());
+        if (!d) { note_fail(res, path.c_str()); return; }
+        struct dirent *ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+            names.emplace_back(ent->d_name);
+        }
+        closedir(d);
+
+        const size_t base = path.size();
+        for (const std::string &name : names) {
+            path += '/';
+            path += name;
+            remove_tree(path, false, res, progress);  // children never keep their shell
+            path.resize(base);
+        }
+
+        if (keep_shell) {
+            res.skipped++;  // managed dir: contents removed, shell intentionally kept
+        } else if (rmdir(path.c_str()) == 0) {
+            res.deleted++;
+            if (progress) progress->fetch_add(1, std::memory_order_relaxed);
+        } else {
+            note_fail(res, path.c_str());
+        }
+    } else {
+        if (unlink(path.c_str()) == 0) {
+            res.deleted++;
+            if (progress) progress->fetch_add(1, std::memory_order_relaxed);
+        } else {
+            note_fail(res, path.c_str());
+        }
+    }
+}
+
+SdManager::DeleteResult SdManager::delete_recursive(
+    const char *path, std::atomic<uint32_t> *progress) const {
+    DeleteResult res;
+    res.requested = 1;
+    if (!mounted_ || !path) {
+        res.skipped = 1;
+        snprintf(res.first_error, sizeof(res.first_error), "SD not mounted");
+        return res;
+    }
+    const DeleteGuard g = check_deletable(path);
+    if (g == DeleteGuard::kBadPath || g == DeleteGuard::kMountRoot) {
+        res.skipped = 1;
+        snprintf(res.first_error, sizeof(res.first_error), "refused: %s", path);
+        return res;
+    }
+    std::string p(path);
+    remove_tree(p, g == DeleteGuard::kManagedDir, res, progress);
+    return res;
+}
+
+SdManager::DeleteResult SdManager::delete_paths(
+    const char *const *paths, size_t n, std::atomic<uint32_t> *progress) const {
+    DeleteResult res;
+    res.requested = static_cast<uint32_t>(n);
+    if (!mounted_ || !paths) {
+        res.skipped = static_cast<uint32_t>(n);
+        snprintf(res.first_error, sizeof(res.first_error), "SD not mounted");
+        return res;
+    }
+
+    // Atomic pre-validation: any bad / mount-root path rejects the WHOLE batch so a
+    // single crafted path can't slip through a partial destructive run.
+    for (size_t i = 0; i < n; ++i) {
+        const DeleteGuard g = paths[i] ? check_deletable(paths[i]) : DeleteGuard::kBadPath;
+        if (g == DeleteGuard::kBadPath || g == DeleteGuard::kMountRoot) {
+            res.skipped = static_cast<uint32_t>(n);
+            snprintf(res.first_error, sizeof(res.first_error), "refused: %s",
+                     paths[i] ? paths[i] : "(null)");
+            return res;  // nothing touched
+        }
+    }
+
+    // Execute best-effort, continue-on-error.
+    for (size_t i = 0; i < n; ++i) {
+        const DeleteGuard g = check_deletable(paths[i]);
+        std::string p(paths[i]);
+        remove_tree(p, g == DeleteGuard::kManagedDir, res, progress);
+    }
+    return res;
 }

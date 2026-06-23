@@ -164,6 +164,15 @@ esp_err_t Storage::set_rinex_collection_enabled(bool enabled) {
     return commit();
 }
 
+bool Storage::night_mode(bool default_value) const {
+    return get_bool("night", default_value);
+}
+
+esp_err_t Storage::set_night_mode(bool night) {
+    ESP_RETURN_ON_ERROR(set_bool("night", night), kTag, "Theme flag save failed");
+    return commit();
+}
+
 bool Storage::get_bool(const char *key, bool default_value) const {
     if (!open_) return default_value;
     uint8_t value = default_value ? 1 : 0;

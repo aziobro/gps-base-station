@@ -30,13 +30,13 @@ Default PORT in idf.sh: `/dev/tty.usbmodem5B140747221`.
 ```bash
 tools/release.sh build [VERSION]          # bump+build+verify binary, no device
 tools/release.sh usb   [VERSION]          # bump+build+USB flash
-ADMIN_PASSWORD=itfloats tools/release.sh ota <device-ip> [VERSION]   # bump+build+OTA+poll /status
+ADMIN_PASSWORD=<admin-pw> tools/release.sh ota <device-ip> [VERSION]   # bump+build+OTA+poll /status
 ```
 `tools/fw_version.py <bin>` extracts the embedded version (scans for esp_app_desc_t magic).
 
 ## Manual OTA (when not using release.sh)
 ```bash
-curl -k -m 300 -u admin:itfloats \
+curl -k -m 300 -u admin:<admin-pw> \
   -H "Content-Type: application/octet-stream" \
   --data-binary @build/gps_base_station.bin \
   https://<device-ip>/update
@@ -45,7 +45,7 @@ Must be raw `application/octet-stream` (NOT `curl -F` multipart → ESP_ERR_OTA_
 
 ## Device / credentials
 - Device IP: `192.168.8.186` (DHCP — may change; `gps-base.local` mDNS also works).
-- Admin user `admin`, password `itfloats`. Web UI is Basic Auth on all pages.
+- Admin user `admin`, password `<admin-pw>`. Web UI is Basic Auth on all pages.
 
 ## Recovery firmware (bootstrap)
 - `bootstrap/` = minimal ~920 KB firmware: WiFi + HTTPS `/update` only. Breaks the OTA catch-22 (main app won't boot / won't fit).
@@ -87,7 +87,7 @@ On Windows the bash scripts above don't apply (`idf.sh`/`release.sh` hardcode `~
 - **Release (bump → build → verify binary → push → verify on device):**
   ```powershell
   .\tools\release.ps1 build                                       # bump+build+verify binary, no device
-  $env:ADMIN_PASSWORD='itfloats'; .\tools\release.ps1 ota 192.168.8.186          # +OTA+poll /status
+  $env:ADMIN_PASSWORD='<admin-pw>'; .\tools\release.ps1 ota 192.168.8.186          # +OTA+poll /status
   .\tools\release.ps1 ota 192.168.8.186 2026.06.12-ota94          # explicit version (skip auto-bump)
   ```
   The device already runs `ota93`, so a real deploy must bump to **ota94 or higher** — `/status` verification can't confirm a re-flash of the same version.

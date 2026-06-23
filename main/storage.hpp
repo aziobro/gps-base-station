@@ -74,6 +74,11 @@ public:
     bool rinex_collection_enabled(bool default_value = false) const;
     esp_err_t set_rinex_collection_enabled(bool enabled);
 
+    // Marine-instrument theme: true = night (default), false = day. Shared by both
+    // the touchscreen and the web UI so they agree across reboots.
+    bool night_mode(bool default_value = true) const;
+    esp_err_t set_night_mode(bool night);
+
 private:
     nvs_handle_t handle_ = 0;
     bool open_ = false;
