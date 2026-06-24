@@ -726,6 +726,13 @@ void Ui::build_ntrip_lights_tile(lv_obj_t *grid) {
     }
 
     // Tappable → deep-link to the Links tab (mirrors make_tile behaviour).
+    t_ntrip_clients_ = lv_label_create(tile);
+    lv_label_set_text(t_ntrip_clients_, "Direct: none");
+    lv_obj_set_width(t_ntrip_clients_, LV_PCT(100));
+    lv_label_set_long_mode(t_ntrip_clients_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(t_ntrip_clients_, lv_color_hex(kDimCol), 0);
+    lv_obj_set_style_text_font(t_ntrip_clients_, &lv_font_montserrat_14, 0);
+
     lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_user_data(tile, (void *)(uintptr_t)(int)Section::Links);
     lv_obj_add_event_cb(tile, on_tile_click, LV_EVENT_CLICKED, this);
@@ -2868,6 +2875,20 @@ void Ui::refresh() {
             }
             lv_label_set_text(t_ntrip_recon_[i], buf);
         }
+    }
+    if (t_ntrip_clients_) {
+        if (st.local_clients > 0) {
+            char ips[160];
+            local_client_ips_to_text(st.local_client_ips, ips, sizeof(ips));
+            snprintf(buf, sizeof(buf), "Direct: %s", ips);
+            lv_obj_set_style_text_color(t_ntrip_clients_,
+                lv_color_hex(kGoodCol), 0);
+        } else {
+            snprintf(buf, sizeof(buf), "Direct: none");
+            lv_obj_set_style_text_color(t_ntrip_clients_,
+                lv_color_hex(kDimCol), 0);
+        }
+        lv_label_set_text(t_ntrip_clients_, buf);
     }
 
     // ── Position (cached in RAM) ──────────────────────────────────────────────

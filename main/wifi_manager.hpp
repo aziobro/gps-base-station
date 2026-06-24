@@ -53,7 +53,7 @@ public:
 
 private:
     static constexpr EventBits_t kConnectedBit = BIT0;
-    static constexpr uint32_t kRetryIntervalMs = 10000;   // station re-association retry
+    static constexpr uint32_t kRetryIntervalMs = 15000;   // station re-association retry
     static constexpr int64_t  kApFallbackMs    = 120000;  // raise SoftAP after 2 min offline
     static constexpr int64_t  kApInfoRefreshMs = 5000;    // throttle esp_wifi_sta_get_ap_info cache
 

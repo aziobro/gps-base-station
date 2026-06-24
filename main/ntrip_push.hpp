@@ -47,8 +47,8 @@ public:
     NtripStatus status() const;
 
 private:
-    static constexpr size_t kMaxPacket = 1024;
-    static constexpr int kQueueDepth = 12;
+    static constexpr size_t kMaxPacket = 1200;
+    static constexpr int kQueueDepth = 4;
 
     struct Packet {
         uint16_t length;

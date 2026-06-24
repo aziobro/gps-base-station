@@ -11,7 +11,6 @@
 namespace {
 
 constexpr char kTag[] = "base_station";
-constexpr int64_t kRtcmBatchUs = 200000;
 
 }  // namespace
 
@@ -162,6 +161,15 @@ void BaseStation::apply_persisted_streams() {
     apply_stream_state();
 }
 
+void BaseStation::set_network_available(bool available) {
+    if (network_available_.exchange(available) == available) return;
+    apply_stream_state();
+    ESP_LOGI(
+        kTag, "Outbound NTRIP streams %s because station WiFi is %s",
+        available ? "enabled" : "suspended",
+        available ? "connected" : "offline");
+}
+
 bool BaseStation::healthy() const {
     const int64_t heartbeat = heartbeat_us_;
     return heartbeat > 0 && esp_timer_get_time() - heartbeat < 2000000;
@@ -276,7 +284,7 @@ void BaseStation::enter_survey(bool clear_position) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.clear_position());
     }
     uart_flush_input(data_uart_);
-    rtcm_batch_length_ = 0;
+    reset_rtcm_parser();
     survey_.start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_survey_output());
     ESP_LOGI(kTag, "Survey mode; all RTCM streams suspended");
@@ -287,7 +295,7 @@ void BaseStation::enter_transmit(double lat, double lon, double height) {
     has_rtcm_data_ = false;
     survey_.reset();
     uart_flush_input(data_uart_);
-    rtcm_batch_length_ = 0;
+    reset_rtcm_parser();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_base(lat, lon, height));
     apply_stream_state();
     ESP_LOGI(kTag, "Base transmission mode");
@@ -330,12 +338,17 @@ bool BaseStation::effective_streams_suspended() const {
         mode_ != BaseMode::kTransmit || !has_rtcm_data_ || raw_collection_;
 }
 
+bool BaseStation::effective_outbound_streams_suspended() const {
+    return effective_streams_suspended() || !network_available_;
+}
+
 void BaseStation::apply_stream_state() {
     const bool suspended = effective_streams_suspended();
     local_caster_.set_suspended(suspended);
-    rtk2go_.set_suspended(suspended);
-    onocoy_.set_suspended(suspended);
-    rtkdata_.set_suspended(suspended);
+    const bool outbound_suspended = effective_outbound_streams_suspended();
+    rtk2go_.set_suspended(outbound_suspended);
+    onocoy_.set_suspended(outbound_suspended);
+    rtkdata_.set_suspended(outbound_suspended);
 }
 
 void BaseStation::read_command_uart() {
@@ -356,6 +369,7 @@ void BaseStation::read_data_uart_raw() {
     }
 }
 
+#if 0
 void BaseStation::read_data_uart() {
     while (rtcm_batch_length_ < rtcm_batch_.size()) {
         const int received = uart_read_bytes(
@@ -381,4 +395,90 @@ void BaseStation::read_data_uart() {
     rtkdata_.push(rtcm_batch_.data(), rtcm_batch_length_);
     rtcm_total_ += rtcm_batch_length_;
     rtcm_batch_length_ = 0;
+}
+#endif
+
+void BaseStation::read_data_uart() {
+    uint8_t buffer[256];
+    int received = 0;
+    do {
+        received = uart_read_bytes(data_uart_, buffer, sizeof(buffer), 0);
+        for (int i = 0; i < received; ++i) {
+            feed_rtcm_byte(buffer[i]);
+        }
+    } while (received == static_cast<int>(sizeof(buffer)));
+}
+
+void BaseStation::feed_rtcm_byte(uint8_t byte) {
+    if (rtcm_frame_length_ == 0) {
+        if (byte != 0xD3) return;
+        rtcm_frame_[rtcm_frame_length_++] = byte;
+        return;
+    }
+
+    rtcm_frame_[rtcm_frame_length_++] = byte;
+
+    if (rtcm_frame_length_ == 2 && (rtcm_frame_[1] & 0xFC) != 0) {
+        reset_rtcm_parser();
+        if (byte == 0xD3) rtcm_frame_[rtcm_frame_length_++] = byte;
+        return;
+    }
+
+    if (rtcm_frame_length_ == 3) {
+        const size_t payload_length =
+            (static_cast<size_t>(rtcm_frame_[1] & 0x03) << 8) |
+            static_cast<size_t>(rtcm_frame_[2]);
+        rtcm_frame_expected_ = payload_length + 6;
+        if (rtcm_frame_expected_ > rtcm_frame_.size() ||
+            rtcm_frame_expected_ < 6) {
+            reset_rtcm_parser();
+        }
+        return;
+    }
+
+    if (rtcm_frame_expected_ == 0 ||
+        rtcm_frame_length_ < rtcm_frame_expected_) {
+        return;
+    }
+
+    const uint32_t actual_crc =
+        (static_cast<uint32_t>(rtcm_frame_[rtcm_frame_expected_ - 3]) << 16) |
+        (static_cast<uint32_t>(rtcm_frame_[rtcm_frame_expected_ - 2]) << 8) |
+        static_cast<uint32_t>(rtcm_frame_[rtcm_frame_expected_ - 1]);
+    const uint32_t expected_crc =
+        rtcm_crc24q(rtcm_frame_.data(), rtcm_frame_expected_ - 3);
+    if (actual_crc == expected_crc) {
+        publish_rtcm_frame(rtcm_frame_.data(), rtcm_frame_expected_);
+    } else {
+        ESP_LOGW(kTag, "Dropped RTCM frame with bad CRC");
+    }
+    reset_rtcm_parser();
+}
+
+void BaseStation::reset_rtcm_parser() {
+    rtcm_frame_length_ = 0;
+    rtcm_frame_expected_ = 0;
+}
+
+void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
+    if (!has_rtcm_data_.exchange(true)) {
+        apply_stream_state();  // first valid RTCM frame unsuspends clients
+    }
+    local_caster_.push(data, length);
+    rtk2go_.push(data, length);
+    onocoy_.push(data, length);
+    rtkdata_.push(data, length);
+    rtcm_total_ += length;
+}
+
+uint32_t BaseStation::rtcm_crc24q(const uint8_t *data, size_t length) {
+    uint32_t crc = 0;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= static_cast<uint32_t>(data[i]) << 16;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc <<= 1;
+            if (crc & 0x1000000) crc ^= 0x1864CFB;
+        }
+    }
+    return crc & 0xFFFFFF;
 }

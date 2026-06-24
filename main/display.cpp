@@ -16,7 +16,7 @@ esp_err_t Display::init() {
     cfg.buffer_size       = BSP_LCD_DRAW_BUFF_SIZE;
     cfg.double_buffer     = BSP_LCD_DRAW_BUFF_DOUBLE;
     cfg.flags.buff_dma    = true;
-    cfg.flags.buff_spiram = false;
+    cfg.flags.buff_spiram = true;
     cfg.flags.sw_rotate   = false;
 
     disp_ = bsp_display_start_with_config(&cfg);

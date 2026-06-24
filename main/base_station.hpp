@@ -53,6 +53,9 @@ public:
     void set_streams_enabled(bool enabled);
     // Apply the persisted NTRIP on/off state (called after the boot hold-off).
     void apply_persisted_streams();
+    // Internet availability gate for outbound NTRIP push clients. Local caster
+    // remains controlled by the normal RTCM/base/raw/user stream state.
+    void set_network_available(bool available);
     bool streams_suspended() const { return effective_streams_suspended(); }
     bool streams_enabled() const { return user_streams_enabled_; }
     bool healthy() const;
@@ -90,15 +93,17 @@ private:
     std::atomic<bool> stopping_{false};
     std::atomic<bool> transient_streams_suspended_{true};
     std::atomic<bool> user_streams_enabled_{true};
+    std::atomic<bool> network_available_{false};
     std::atomic<bool> has_rtcm_data_{false};
     std::atomic<bool> raw_collection_{false};
     std::atomic<BaseMode> mode_{BaseMode::kSurvey};
     std::atomic<uint32_t> rtcm_bps_{0};
     std::atomic<uint64_t> rtcm_total_{0};
     std::atomic<int64_t> heartbeat_us_{0};
-    std::array<uint8_t, 1024> rtcm_batch_{};
-    size_t rtcm_batch_length_ = 0;
-    int64_t rtcm_batch_started_us_ = 0;
+    static constexpr size_t kMaxRtcmFrame = 1200;
+    std::array<uint8_t, kMaxRtcmFrame> rtcm_frame_{};
+    size_t rtcm_frame_length_ = 0;
+    size_t rtcm_frame_expected_ = 0;
 
     static void task_entry(void *argument);
     void run();
@@ -108,8 +113,13 @@ private:
     void enter_raw_collection();
     void exit_raw_collection();
     bool effective_streams_suspended() const;
+    bool effective_outbound_streams_suspended() const;
     void apply_stream_state();
     void read_command_uart();
     void read_data_uart();
     void read_data_uart_raw();
+    void feed_rtcm_byte(uint8_t byte);
+    void reset_rtcm_parser();
+    void publish_rtcm_frame(const uint8_t *data, size_t length);
+    static uint32_t rtcm_crc24q(const uint8_t *data, size_t length);
 };

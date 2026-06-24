@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
+#include <string_view>
 
 #include "app_config.hpp"
 #include "esp_log.h"
@@ -16,32 +16,51 @@ namespace {
 constexpr char kTag[] = "survey";
 constexpr double kMetresPerDegree = 111319.5;
 
-std::vector<std::string> split(std::string value, char delimiter) {
-    std::vector<std::string> fields;
-    size_t start = 0;
-    while (start <= value.size()) {
-        size_t end = value.find(delimiter, start);
-        if (end == std::string::npos) end = value.size();
-        fields.emplace_back(value.substr(start, end - start));
-        start = end + 1;
-    }
-    return fields;
+bool starts_with(std::string_view value, std::string_view prefix) {
+    return value.size() >= prefix.size() &&
+           value.substr(0, prefix.size()) == prefix;
 }
 
-bool parse_double(const std::string &text, double &value) {
+std::string_view without_checksum(std::string_view value) {
+    const size_t checksum = value.find('*');
+    return checksum == std::string_view::npos ? value : value.substr(0, checksum);
+}
+
+bool csv_field(std::string_view value, size_t index, std::string_view &field) {
+    size_t start = 0;
+    for (size_t current = 0; start <= value.size(); ++current) {
+        size_t end = value.find(',', start);
+        if (end == std::string_view::npos) end = value.size();
+        if (current == index) {
+            field = value.substr(start, end - start);
+            return true;
+        }
+        if (end == value.size()) break;
+        start = end + 1;
+    }
+    field = {};
+    return false;
+}
+
+bool parse_double(std::string_view text, double &value) {
     if (text.empty()) return false;
+    char scratch[40]{};
+    if (text.size() >= sizeof(scratch)) return false;
+    memcpy(scratch, text.data(), text.size());
     errno = 0;
     char *end = nullptr;
-    value = strtod(text.c_str(), &end);
-    return errno == 0 && end != text.c_str() && *end == '\0' &&
+    value = strtod(scratch, &end);
+    return errno == 0 && end != scratch && *end == '\0' &&
            std::isfinite(value);
 }
 
-int parse_int(std::string text) {
-    const size_t checksum = text.find('*');
-    if (checksum != std::string::npos) text.resize(checksum);
+int parse_int(std::string_view text) {
+    text = without_checksum(text);
     if (text.empty()) return 0;
-    return atoi(text.c_str());
+    char scratch[16]{};
+    if (text.size() >= sizeof(scratch)) return 0;
+    memcpy(scratch, text.data(), text.size());
+    return atoi(scratch);
 }
 
 }  // namespace
@@ -52,7 +71,7 @@ void SurveyManager::start() {
     result_ = {};
     live_ = {};
     live_.state = state_;
-    line_.clear();
+    line_len_ = 0;
     started_us_ = esp_timer_get_time();
     completion_pending_ = false;
     samples_ = 0;
@@ -73,7 +92,7 @@ void SurveyManager::reset() {
     state_ = SurveyState::kIdle;
     result_ = {};
     live_ = {};
-    line_.clear();
+    line_len_ = 0;
     completion_pending_ = false;
     satellite_count_ = 0;
     gsv_count_ = 0;
@@ -86,11 +105,15 @@ void SurveyManager::feed(const uint8_t *data, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         const char byte = static_cast<char>(data[i]);
         if (byte == '\n') {
-            parse_line(line_);
-            line_.clear();
+            line_[line_len_] = '\0';
+            parse_line(std::string_view(line_.data(), line_len_));
+            line_len_ = 0;
         } else if (byte != '\r') {
-            line_.push_back(byte);
-            if (line_.size() > kMaxLine) line_.clear();
+            if (line_len_ < kMaxLine) {
+                line_[line_len_++] = byte;
+            } else {
+                line_len_ = 0;
+            }
         }
     }
 }
@@ -128,34 +151,41 @@ size_t SurveyManager::satellites(
     return count;
 }
 
-void SurveyManager::parse_line(const std::string &line) {
-    if (line.rfind("$GNGSA", 0) == 0) parse_gsa(line);
-    else if (line.rfind("$GPGSV", 0) == 0) parse_gsv(line, 1);
-    else if (line.rfind("$GLGSV", 0) == 0) parse_gsv(line, 2);
-    else if (line.rfind("$GAGSV", 0) == 0) parse_gsv(line, 3);
-    else if (line.rfind("$GBGSV", 0) == 0) parse_gsv(line, 4);
+void SurveyManager::parse_line(std::string_view line) {
+    if (starts_with(line, "$GNGSA")) parse_gsa(line);
+    else if (starts_with(line, "$GPGSV")) parse_gsv(line, 1);
+    else if (starts_with(line, "$GLGSV")) parse_gsv(line, 2);
+    else if (starts_with(line, "$GAGSV")) parse_gsv(line, 3);
+    else if (starts_with(line, "$GBGSV")) parse_gsv(line, 4);
     else if (state_ == SurveyState::kCollecting &&
-             line.rfind("#BESTPOSA", 0) == 0) {
+             starts_with(line, "#BESTPOSA")) {
         parse_best_position(line);
     }
 }
 
-void SurveyManager::parse_best_position(const std::string &line) {
+void SurveyManager::parse_best_position(std::string_view line) {
     const size_t separator = line.find(';');
-    if (separator == std::string::npos) return;
-    std::string payload = line.substr(separator + 1);
-    const size_t checksum = payload.find('*');
-    if (checksum != std::string::npos) payload.resize(checksum);
-    const auto fields = split(payload, ',');
-    if (fields.size() < 10 || fields[0] != "SOL_COMPUTED") return;
+    if (separator == std::string_view::npos) return;
+    const std::string_view payload = without_checksum(line.substr(separator + 1));
+    std::string_view field;
+    if (!csv_field(payload, 0, field) || field != "SOL_COMPUTED") return;
 
     double lat = 0, lon = 0, height = 0;
     double lat_sigma = 0, lon_sigma = 0, height_sigma = 0;
-    if (!parse_double(fields[2], lat) || !parse_double(fields[3], lon) ||
-        !parse_double(fields[4], height) ||
-        !parse_double(fields[7], lat_sigma) ||
-        !parse_double(fields[8], lon_sigma) ||
-        !parse_double(fields[9], height_sigma)) {
+    std::string_view lat_field, lon_field, height_field;
+    std::string_view lat_sigma_field, lon_sigma_field, height_sigma_field;
+    if (!csv_field(payload, 2, lat_field) ||
+        !csv_field(payload, 3, lon_field) ||
+        !csv_field(payload, 4, height_field) ||
+        !csv_field(payload, 7, lat_sigma_field) ||
+        !csv_field(payload, 8, lon_sigma_field) ||
+        !csv_field(payload, 9, height_sigma_field) ||
+        !parse_double(lat_field, lat) ||
+        !parse_double(lon_field, lon) ||
+        !parse_double(height_field, height) ||
+        !parse_double(lat_sigma_field, lat_sigma) ||
+        !parse_double(lon_sigma_field, lon_sigma) ||
+        !parse_double(height_sigma_field, height_sigma)) {
         return;
     }
     if (lat < -90 || lat > 90 || lon < -180 || lon > 180 ||
@@ -206,9 +236,9 @@ void SurveyManager::parse_best_position(const std::string &line) {
                   static_cast<float>(lon_sigma),
                   static_cast<float>(height_sigma)});
     live_.satellites_used =
-        fields.size() > 13 ? parse_int(fields[13]) : 0;
+        csv_field(payload, 13, field) ? parse_int(field) : 0;
     live_.satellites_tracked =
-        fields.size() > 14 ? parse_int(fields[14]) : 0;
+        csv_field(payload, 14, field) ? parse_int(field) : 0;
     live_.samples = samples_;
     live_.blocks = block_count_;
     live_.elapsed_sec = elapsed;
@@ -235,14 +265,15 @@ void SurveyManager::parse_best_position(const std::string &line) {
     }
 }
 
-void SurveyManager::parse_gsa(const std::string &line) {
-    const auto fields = split(line, ',');
-    if (fields.size() < 19) return;
+void SurveyManager::parse_gsa(std::string_view line) {
+    std::string_view field;
+    if (!csv_field(line, 18, field)) return;
     int count = 0;
-    for (size_t i = 3; i <= 14 && i < fields.size(); ++i) {
-        if (!fields[i].empty()) ++count;
+    for (size_t i = 3; i <= 14; ++i) {
+        if (csv_field(line, i, field) && !field.empty()) ++count;
     }
-    switch (parse_int(fields[18])) {
+    if (!csv_field(line, 18, field)) return;
+    switch (parse_int(field)) {
         case 1: live_.gps = count; break;
         case 2: live_.glonass = count; break;
         case 3: live_.galileo = count; break;
@@ -251,31 +282,39 @@ void SurveyManager::parse_gsa(const std::string &line) {
     }
 }
 
-void SurveyManager::parse_gsv(const std::string &line, uint8_t system) {
-    std::string payload = line;
-    const size_t checksum = payload.find('*');
-    if (checksum != std::string::npos) payload.resize(checksum);
-    const auto fields = split(payload, ',');
-    if (fields.size() < 4) return;
-    const int message_count = parse_int(fields[1]);
-    const int message_number = parse_int(fields[2]);
+void SurveyManager::parse_gsv(std::string_view line, uint8_t system) {
+    const std::string_view payload = without_checksum(line);
+    std::string_view field;
+    std::string_view message_count_field;
+    std::string_view message_number_field;
+    if (!csv_field(payload, 1, message_count_field) ||
+        !csv_field(payload, 2, message_number_field)) {
+        return;
+    }
+    const int message_count = parse_int(message_count_field);
+    const int message_number = parse_int(message_number_field);
     if (message_count < 1 || message_number < 1) return;
 
     if (message_number == 1 || system != gsv_system_) {
         gsv_count_ = 0;
         gsv_system_ = system;
     }
-    for (size_t i = 4; i + 2 < fields.size() &&
-                       gsv_count_ < gsv_buffer_.size(); i += 4) {
-        const int prn = parse_int(fields[i]);
+    for (size_t i = 4; gsv_count_ < gsv_buffer_.size(); i += 4) {
+        std::string_view prn_field, elevation_field, azimuth_field, snr_field;
+        if (!csv_field(payload, i, prn_field) ||
+            !csv_field(payload, i + 1, elevation_field) ||
+            !csv_field(payload, i + 2, azimuth_field)) {
+            break;
+        }
+        const int prn = parse_int(prn_field);
         if (prn == 0) continue;
         gsv_buffer_[gsv_count_++] = {
             static_cast<uint16_t>(std::clamp(prn, 0, 999)),
-            static_cast<uint8_t>(std::clamp(parse_int(fields[i + 1]), 0, 90)),
-            static_cast<uint16_t>(std::clamp(parse_int(fields[i + 2]), 0, 359)),
+            static_cast<uint8_t>(std::clamp(parse_int(elevation_field), 0, 90)),
+            static_cast<uint16_t>(std::clamp(parse_int(azimuth_field), 0, 359)),
             static_cast<uint8_t>(
-                i + 3 < fields.size()
-                    ? std::clamp(parse_int(fields[i + 3]), 0, 99) : 0),
+                csv_field(payload, i + 3, snr_field)
+                    ? std::clamp(parse_int(snr_field), 0, 99) : 0),
             system,
         };
     }

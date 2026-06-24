@@ -267,15 +267,15 @@ esp_err_t AdminWebServer::start(
     // headroom for future routes without re-tuning.
     tls_config.httpd.max_uri_handlers = 40;
     tls_config.httpd.stack_size = 12288;
-    tls_config.httpd.recv_wait_timeout = 15;
-    tls_config.httpd.send_wait_timeout = 15;
-    tls_config.httpd.lru_purge_enable = false;
-    tls_config.httpd.backlog_conn = 1;
+    tls_config.httpd.recv_wait_timeout = 5;
+    tls_config.httpd.send_wait_timeout = 5;
+    tls_config.httpd.lru_purge_enable = true;
+    tls_config.httpd.backlog_conn = 2;
     // The web UI is an admin cockpit, not a multi-user service. Keep the socket
     // pool small, but avoid sticky keep-alive sockets: a browser can otherwise
     // occupy the whole pool and prevent a second browser from reaching /login to
     // take over the single active session.
-    tls_config.httpd.max_open_sockets = 3;
+    tls_config.httpd.max_open_sockets = 4;
     tls_config.httpd.keep_alive_enable = false;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
@@ -617,7 +617,8 @@ function refresh(d){
   svclight('d-r2g-dot','d-r2g-rc',d.rtk2go);
   svclight('d-onc-dot','d-onc-rc',d.onocoy);
   svclight('d-rtk-dot','d-rtk-rc',d.rtkdata);
-  set('d-ntrip-sub',d.local_clients+' clients');
+  const localIps=(d.local_client_ips&&d.local_client_ips.length)?d.local_client_ips.join(', '):'none';
+  set('d-ntrip-sub','direct '+d.local_clients+': '+localIps);
   // Position
   if(d.position_valid){set('d-pos',d.position_lat.toFixed(6)+', '+d.position_lon.toFixed(6));}
   else set('d-pos','not set');
@@ -1125,6 +1126,26 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
             ",\"last_send_age\":" + std::to_string(status.last_send_age_sec) + "}";
     };
     const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    const size_t internal_free_heap =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_total_heap =
+        heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_min_free_heap =
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_largest_free =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t dma_free_heap =
+        heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    const size_t dma_largest_free =
+        heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    const size_t spiram_free_heap =
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t spiram_total_heap =
+        heap_caps_get_total_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t spiram_min_free_heap =
+        heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t spiram_largest_free =
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const SurveySnapshot &sv = station.survey;
     const char *survey_state =
         sv.state == SurveyState::kCollecting ? "collecting" :
@@ -1154,6 +1175,16 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         std::to_string(heap_caps_get_total_size(MALLOC_CAP_8BIT)) +
         ",\"min_free_heap\":" +
         std::to_string(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)) +
+        ",\"internal_free_heap\":" + std::to_string(internal_free_heap) +
+        ",\"internal_heap_total\":" + std::to_string(internal_total_heap) +
+        ",\"internal_min_free_heap\":" + std::to_string(internal_min_free_heap) +
+        ",\"internal_largest_free_block\":" + std::to_string(internal_largest_free) +
+        ",\"dma_free_heap\":" + std::to_string(dma_free_heap) +
+        ",\"dma_largest_free_block\":" + std::to_string(dma_largest_free) +
+        ",\"spiram_free_heap\":" + std::to_string(spiram_free_heap) +
+        ",\"spiram_heap_total\":" + std::to_string(spiram_total_heap) +
+        ",\"spiram_min_free_heap\":" + std::to_string(spiram_min_free_heap) +
+        ",\"spiram_largest_free_block\":" + std::to_string(spiram_largest_free) +
         ",\"mode\":\"" +
         std::string(station.mode == BaseMode::kTransmit ? "base_tx" : "survey") +
         "\",\"rtcm_bps\":" +
@@ -3020,9 +3051,9 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
     httpd_resp_set_hdr(request, "Content-Disposition",
                        "attachment; filename=\"export.rnx\"");
 
-    // 4 KB chunks + one tick (10 ms @ 100 Hz) paces output to ~400 KB/s,
-    // staying within esp_hosted SDIO bandwidth.
-    char buf[4096];
+    // Keep export traffic below the point where SDIO/TLS can starve the
+    // outbound NTRIP sockets.
+    char buf[2048];
     bool header_sent = false;
 
     for (const std::string &path : paths) {
@@ -3067,7 +3098,7 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
                     fclose(f);
                     goto done;
                 }
-                vTaskDelay(pdMS_TO_TICKS(1));
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
             header_sent = true;
         } else {
@@ -3083,7 +3114,7 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
                         fclose(f);
                         goto done;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(1));
+                    vTaskDelay(pdMS_TO_TICKS(10));
                 }
             }
         }

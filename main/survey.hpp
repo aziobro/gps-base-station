@@ -3,7 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <mutex>
-#include <string>
+#include <string_view>
 
 enum class SurveyState {
     kIdle,
@@ -69,7 +69,8 @@ private:
     SurveyState state_ = SurveyState::kIdle;
     SurveyResult result_;
     SurveySnapshot live_;
-    std::string line_;
+    std::array<char, kMaxLine + 1> line_{};
+    size_t line_len_ = 0;
     int64_t started_us_ = 0;
     bool completion_pending_ = false;
 
@@ -100,10 +101,10 @@ private:
     size_t gsv_count_ = 0;
     uint8_t gsv_system_ = 0;
 
-    void parse_line(const std::string &line);
-    void parse_best_position(const std::string &line);
-    void parse_gsa(const std::string &line);
-    void parse_gsv(const std::string &line, uint8_t system);
+    void parse_line(std::string_view line);
+    void parse_best_position(std::string_view line);
+    void parse_gsa(std::string_view line);
+    void parse_gsv(std::string_view line, uint8_t system);
     void commit_block();
 
     static void update_welford(

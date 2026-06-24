@@ -55,6 +55,7 @@ private:
     // Each row: colored dot + service name + reconnect count after the name.
     lv_obj_t *t_ntrip_dot_[3]   = {nullptr, nullptr, nullptr};  // service status dots
     lv_obj_t *t_ntrip_recon_[3] = {nullptr, nullptr, nullptr};  // per-service reconnect labels
+    lv_obj_t *t_ntrip_clients_  = nullptr;                      // direct client IPs
     lv_obj_t *lbl_t_pos_      = nullptr;   // Position tile value (compact lat/lon)
     lv_obj_t *lbl_t_pos_sub_  = nullptr;   // Position tile sub
     lv_obj_t *lbl_t_sd_       = nullptr;   // SD/RINEX tile value

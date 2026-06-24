@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "lwip/tcp.h"
 #include "lwip/netdb.h"
@@ -18,6 +19,13 @@ namespace {
 constexpr char kTag[] = "ntrip_push";
 constexpr int kBaseRetryMs = 10000;
 constexpr int kMaxRetryMs = 120000;
+
+int retry_delay_ms(int failures) {
+    const int capped = std::clamp(failures, 1, 4);
+    const int base = std::min(kBaseRetryMs << (capped - 1), kMaxRetryMs);
+    const int jitter = static_cast<int>(esp_random() % 5000);
+    return std::min(base + jitter, kMaxRetryMs);
+}
 
 }  // namespace
 
@@ -174,9 +182,7 @@ void NtripPushClient::run() {
                 // After several consecutive failures invalidate the cached
                 // address so the next attempt forces a fresh DNS lookup.
                 if (failures >= 3) cached_addr_valid_ = false;
-                const int retry = std::min(
-                    kBaseRetryMs << std::min(failures, 3), kMaxRetryMs);
-                vTaskDelay(pdMS_TO_TICKS(retry));
+                vTaskDelay(pdMS_TO_TICKS(retry_delay_ms(failures)));
                 continue;
             }
             failures = 0;
@@ -186,8 +192,11 @@ void NtripPushClient::run() {
                 last_send_us_ = esp_timer_get_time();
             } else {
                 ++reconnects_;
+                ++failures;
                 set_error("write failed; reconnecting");
                 close_socket();
+                set_message("waiting to reconnect", false);
+                vTaskDelay(pdMS_TO_TICKS(retry_delay_ms(failures)));
             }
         }
     }

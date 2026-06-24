@@ -515,8 +515,12 @@ void WifiManager::request_connect() {
     // returns ESP_ERR_WIFI_CONN (silently ignored) when L2 is still up.
     // That's exactly what happens after IP_EVENT_STA_LOST_IP — the association
     // survives the lease loss, so without this the DHCP client never restarts.
-    esp_wifi_disconnect();
+    last_retry_ms_ = now_ms();
     esp_err_t result = esp_wifi_connect();
+    if (result == ESP_ERR_WIFI_CONN) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_disconnect());
+        result = esp_wifi_connect();
+    }
     if (result != ESP_OK && result != ESP_ERR_WIFI_CONN) {
         ESP_LOGW(kTag, "Connect request failed: %s", esp_err_to_name(result));
     }

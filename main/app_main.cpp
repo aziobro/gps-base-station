@@ -133,6 +133,27 @@ void enable_rtk_task(void *argument) {
     vTaskDelete(nullptr);
 }
 
+struct NetworkGateArgs {
+    WifiManager *wifi = nullptr;
+    BaseStation *station = nullptr;
+};
+
+void network_gate_task(void *argument) {
+    auto *args = static_cast<NetworkGateArgs *>(argument);
+    bool last_available = false;
+    bool initialized = false;
+    while (args && args->wifi && args->station) {
+        const bool available = args->wifi->connected();
+        if (!initialized || available != last_available) {
+            args->station->set_network_available(available);
+            last_available = available;
+            initialized = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    vTaskDelete(nullptr);
+}
+
 }  // namespace
 
 extern "C" void app_main() {
@@ -165,6 +186,7 @@ extern "C" void app_main() {
     // HTTPS is brought up before outbound or local RTCM transmission begins.
     base_station.set_streams_suspended(true);
     ESP_ERROR_CHECK(base_station.start());
+    base_station.set_network_available(wifi_manager.connected());
 
     static SdManager sd_manager;
     if (sd_manager.mount() == ESP_OK) {
@@ -193,6 +215,13 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(
         xTaskCreate(
             enable_rtk_task, "rtk_enable", 2048, &base_station, 3, nullptr)
+            == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+
+    static NetworkGateArgs network_gate_args{&wifi_manager, &base_station};
+    ESP_ERROR_CHECK(
+        xTaskCreate(
+            network_gate_task, "network_gate", 2048, &network_gate_args, 3,
+            nullptr)
             == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     ESP_ERROR_CHECK(
