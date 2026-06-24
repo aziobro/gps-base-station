@@ -20,6 +20,7 @@
 #include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "log_buffer.hpp"
@@ -27,13 +28,59 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
-#include "mbedtls/base64.h"
 
 namespace {
 
 constexpr char kTag[] = "web";
 constexpr char kAdminUser[] = "admin";
+constexpr char kSessionCookieName[] = "gps_admin";
 constexpr char kRawDataDir[] = "/sdcard/rawdata";
+constexpr int64_t kSessionIdleTimeoutUs = 60LL * 60LL * 1000000LL;
+constexpr int64_t kLoginBaseDelayUs = 5LL * 1000000LL;
+constexpr int64_t kLoginMaxDelayUs = 30LL * 1000000LL;
+
+std::string header_value(httpd_req_t *request, const char *name, size_t max_len = 1024) {
+    size_t length = httpd_req_get_hdr_value_len(request, name);
+    if (length == 0 || length > max_len) return {};
+    std::vector<char> value(length + 1);
+    if (httpd_req_get_hdr_value_str(
+            request, name, value.data(), value.size()) != ESP_OK) {
+        return {};
+    }
+    return value.data();
+}
+
+std::string cookie_value(httpd_req_t *request, const char *name) {
+    const std::string cookies = header_value(request, "Cookie");
+    const std::string wanted = std::string(name) + "=";
+    size_t start = 0;
+    while (start < cookies.size()) {
+        while (start < cookies.size() &&
+               (cookies[start] == ';' || cookies[start] == ' ')) {
+            ++start;
+        }
+        size_t end = cookies.find(';', start);
+        if (end == std::string::npos) end = cookies.size();
+        if (cookies.compare(start, wanted.size(), wanted) == 0) {
+            return cookies.substr(start + wanted.size(), end - start - wanted.size());
+        }
+        start = end + 1;
+    }
+    return {};
+}
+
+bool accepts_html(httpd_req_t *request) {
+    const std::string accept = header_value(request, "Accept", 256);
+    return accept.find("text/html") != std::string::npos;
+}
+
+bool safe_local_path(const std::string &path) {
+    return !path.empty() && path[0] == '/' &&
+           path.find("://") == std::string::npos &&
+           path.find('\\') == std::string::npos &&
+           path.find('\r') == std::string::npos &&
+           path.find('\n') == std::string::npos;
+}
 
 // Convert a Gregorian UTC date/time to Unix seconds.  Accurate for 2000–2099.
 time_t utc_to_unix(int Y, int Mo, int D, int h, int m, int s) {
@@ -220,19 +267,15 @@ esp_err_t AdminWebServer::start(
     // headroom for future routes without re-tuning.
     tls_config.httpd.max_uri_handlers = 40;
     tls_config.httpd.stack_size = 12288;
-    tls_config.httpd.recv_wait_timeout = 30;
-    tls_config.httpd.send_wait_timeout = 30;
+    tls_config.httpd.recv_wait_timeout = 15;
+    tls_config.httpd.send_wait_timeout = 15;
     tls_config.httpd.lru_purge_enable = false;
-    // Cap concurrent TLS sessions hard. On this board malloc()/std::string AND the
-    // mbedtls/esp-aes DMA buffers all live in the SAME scarce internal SRAM, so every
-    // extra simultaneous TLS handshake competes with page-building for it. At 8, a
-    // browser's parallel connections + the /status poll + NTRIP exhausted internal
-    // SRAM; with C++ exceptions off a failed alloc became abort() → a reboot loop
-    // (esp-aes "Failed to allocate memory" / mbedtls -0x0084 just before each abort).
-    // Two sockets are enough for the admin page plus one polling request. The ESP32-P4
-    // AES/TLS path can still run out of internal DMA-capable memory during caster
-    // reconnects, so keep browser handshake concurrency deliberately low.
-    tls_config.httpd.max_open_sockets = 2;
+    tls_config.httpd.backlog_conn = 1;
+    // The web UI is an admin cockpit, not a multi-user service. Keep the socket
+    // pool small, but avoid sticky keep-alive sockets: a browser can otherwise
+    // occupy the whole pool and prevent a second browser from reaching /login to
+    // take over the single active session.
+    tls_config.httpd.max_open_sockets = 3;
     tls_config.httpd.keep_alive_enable = false;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
@@ -286,6 +329,10 @@ esp_err_t AdminWebServer::start(
 
 esp_err_t AdminWebServer::register_secure_handlers() {
     const httpd_uri_t handlers[] = {
+        {"/login", HTTP_GET, login_get_handler, this},
+        {"/login", HTTP_POST, login_post_handler, this},
+        {"/logout", HTTP_GET, logout_handler, this},
+        {"/logout", HTTP_POST, logout_handler, this},
         {"/", HTTP_GET, root_handler, this},
         {"/setup", HTTP_GET, setup_get_handler, this},
         {"/setup", HTTP_POST, setup_post_handler, this},
@@ -365,6 +412,8 @@ esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
 
     const std::string uri = request->uri;
     if (request->method == HTTP_GET) {
+        if (uri == "/login") return login_get_handler(request);
+        if (uri == "/logout") return logout_handler(request);
         if (uri == "/") return root_handler(request);
         if (uri == "/setup") return setup_get_handler(request);
         if (uri == "/config") return config_get_handler(request);
@@ -372,6 +421,8 @@ esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
         if (uri == "/status") return status_handler(request);
         if (uri == "/ca.crt") return ca_certificate_handler(request);
     } else if (request->method == HTTP_POST) {
+        if (uri == "/login") return login_post_handler(request);
+        if (uri == "/logout") return logout_handler(request);
         if (uri == "/setup") return setup_post_handler(request);
         if (uri == "/config/wifi") return wifi_handler(request);
     }
@@ -390,6 +441,79 @@ esp_err_t AdminWebServer::ca_certificate_handler(httpd_req_t *request) {
     return httpd_resp_send(
         request, reinterpret_cast<const char *>(ca_cert_start),
         ca_cert_end - ca_cert_start - 1);
+}
+
+esp_err_t AdminWebServer::login_get_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->storage_->admin_password_set()) {
+        httpd_resp_set_status(request, "303 See Other");
+        httpd_resp_set_hdr(request, "Location", "/setup");
+        return httpd_resp_send(request, nullptr, 0);
+    }
+    std::string next = query_param(request, "next");
+    if (!safe_local_path(next) || next == "/login") next = "/";
+    if (server->authorize(request)) {
+        httpd_resp_set_status(request, "303 See Other");
+        httpd_resp_set_hdr(request, "Location", next.c_str());
+        return httpd_resp_send(request, nullptr, 0);
+    }
+    return server->send_login_page(request, "", next);
+}
+
+esp_err_t AdminWebServer::login_post_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->storage_->admin_password_set()) {
+        httpd_resp_set_status(request, "303 See Other");
+        httpd_resp_set_hdr(request, "Location", "/setup");
+        return httpd_resp_send(request, nullptr, 0);
+    }
+
+    const int64_t now = esp_timer_get_time();
+    std::string next = "/";
+    if (now < server->login_block_until_us_) {
+        const int seconds =
+            static_cast<int>((server->login_block_until_us_ - now + 999999) / 1000000);
+        return server->send_login_page(
+            request, "Too many failed logins. Try again in " +
+                         std::to_string(seconds) + " seconds.",
+            next);
+    }
+
+    const std::string body = read_body(request, 512);
+    const std::string user = form_value(body, "user");
+    const std::string password = form_value(body, "password");
+    const std::string requested_next = form_value(body, "next");
+    if (safe_local_path(requested_next) && requested_next != "/login") {
+        next = requested_next;
+    }
+
+    if (server->password_matches(user, password)) {
+        const std::string cookie =
+            server->start_session_cookie(request->handle == server->https_server_);
+        httpd_resp_set_status(request, "303 See Other");
+        httpd_resp_set_hdr(request, "Set-Cookie", cookie.c_str());
+        httpd_resp_set_hdr(request, "Location", next.c_str());
+        return httpd_resp_send(request, nullptr, 0);
+    }
+
+    ++server->failed_login_count_;
+    if (server->failed_login_count_ >= 3) {
+        int64_t delay = kLoginBaseDelayUs *
+                        static_cast<int64_t>(server->failed_login_count_ - 2);
+        if (delay > kLoginMaxDelayUs) delay = kLoginMaxDelayUs;
+        server->login_block_until_us_ = now + delay;
+    }
+    return server->send_login_page(request, "Invalid admin login.", next);
+}
+
+esp_err_t AdminWebServer::logout_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    const std::string cookie =
+        server->clear_session_cookie(request->handle == server->https_server_);
+    httpd_resp_set_status(request, "303 See Other");
+    httpd_resp_set_hdr(request, "Set-Cookie", cookie.c_str());
+    httpd_resp_set_hdr(request, "Location", "/login");
+    return httpd_resp_send(request, nullptr, 0);
 }
 
 esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
@@ -462,20 +586,14 @@ esp_err_t AdminWebServer::root_handler(httpd_req_t *request) {
         " &middot; FW " + std::string(esp_app_get_description()->version) +
         " &middot; <a href='/status'>JSON status</a>"
         "</footer>"
-        R"HTML(<script>
-let statusRequest=false;
+R"HTML(<script>
 function bytes(v){return v>=1048576?(v/1048576).toFixed(1)+' MB':v>=1024?(v/1024).toFixed(1)+' KB':v+' B';}
 function set(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
 // Set the colored value class on a tile value (good/warn/crit/idle).
 function sev(id,s){const e=document.getElementById(id);if(e){e.className='tval '+s;}}
 function pill(id,txtId,s,txt){const e=document.getElementById(id);if(e)e.className='pill '+s;set(txtId,txt);}
-// The global header pill is driven by the shared nav poller (navPoll in nav_html),
-// which runs on every page. This dashboard poll only updates the tile readouts.
-async function refresh(){
- if(statusRequest)return;statusRequest=true;
- try{
-  const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);
-  const d=await r.json();
+// The shared nav poller owns /status; the dashboard only renders delivered data.
+function refresh(d){
   // RTCM hero — green when transmitting, idle when not.
   const tx=d.mode==='base_tx';
   set('d-rtcm',d.rtcm_bps);sev('d-rtcm',tx&&d.rtcm_bps>0?'good':'idle');
@@ -516,14 +634,13 @@ async function refresh(){
   if(d.wifi_connected){set('d-link',d.ssid||'WiFi');set('d-link-sub',(d.ip||'')+' · '+d.rssi+' dBm');sev('d-link',d.rssi>-75?'good':'warn');}
   else if(d.ap_active){set('d-link','AP mode');set('d-link-sub','GPS-BaseStation');sev('d-link','warn');}
   else{set('d-link','offline');set('d-link-sub','no network');sev('d-link','crit');}
- }catch(e){}finally{statusRequest=false;setTimeout(refresh,15000);}
 }
 async function startSurvey(){
  if(!confirm('Start a new survey-in? This leaves Base TX and stops RTCM output until the survey completes.'))return;
  try{await fetch('/survey',{method:'POST'});}catch(e){}
- setTimeout(refresh,500);
+ if(window.refreshStatus)window.refreshStatus(500);
 }
-refresh();
+if(window.onStatus)window.onStatus(refresh);
 </script>)HTML";
     return server->send_page(
         request, "GPS Base Station", content, "/");
@@ -562,7 +679,10 @@ esp_err_t AdminWebServer::setup_post_handler(httpd_req_t *request) {
     ESP_RETURN_ON_ERROR(
         server->storage_->save_admin_password(password),
         kTag, "Password save failed");
+    const std::string cookie =
+        server->start_session_cookie(request->handle == server->https_server_);
     httpd_resp_set_status(request, "303 See Other");
+    httpd_resp_set_hdr(request, "Set-Cookie", cookie.c_str());
     httpd_resp_set_hdr(request, "Location", "/");
     return httpd_resp_send(request, nullptr, 0);
 }
@@ -726,16 +846,14 @@ esp_err_t AdminWebServer::position_page_handler(httpd_req_t *request) {
         "body:'start='+(on?'1':'0')});"
         "var j=await r.json();"
         "if(!j.ok)throw 0;rxSet(on);"
-        "m.textContent=on?'RINEX logging started.':'RINEX logging stopped.';}"
+        "m.textContent=on?'RINEX logging started.':'RINEX logging stopped.';"
+        "if(window.refreshStatus)window.refreshStatus(500);}"
         "catch(e){m.textContent='Toggle failed.';}}"
         // ── Live current-position status poll (header tiles) ─────────────────────
         "function pSet(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}"
         "function pSev(id,s){var e=document.getElementById(id);"
         "if(e)e.className='tval '+s;}"
-        "var pBusy=false;"
-        "async function pPoll(){if(pBusy)return;pBusy=true;"
-        "try{var r=await fetch('/status',{cache:'no-store'});"
-        "if(r.ok){var d=await r.json();"
+        "function pApply(d){"
         // Coordinate + height: the live solution (stored fixed base while in Base
         // TX, or the converging survey solution while surveying).
         "if(d.mode==='base_tx'&&d.position_valid){"
@@ -761,8 +879,8 @@ esp_err_t AdminWebServer::position_page_handler(httpd_req_t *request) {
         "var bar=document.getElementById('p-survey-bar');if(bar)bar.style.width=pct+'%';"
         "var mins=Math.floor((d.survey_elapsed||0)/60);"
         "pSet('p-survey-sub',(d.survey_samples||0)+' samples · '+mins+' min');"
-        "}}catch(e){}finally{pBusy=false;setTimeout(pPoll,15000);}}"
-        "pPoll();"
+        "}"
+        "if(window.onStatus)window.onStatus(pApply);"
         "</script>";
     return server->send_page(
         request, "Position Setup", content, "/position");
@@ -805,6 +923,7 @@ esp_err_t AdminWebServer::system_page_handler(httpd_req_t *request) {
         "<p><a href='/update'>Firmware Update (OTA)</a></p>"
         "<p><a href='/logs'>Console Logs</a></p>"
         "<p><a href='/ca.crt'>Download CA Certificate</a></p>"
+        "<p><a href='/logout'>Log out</a></p>"
         "<p class='dim'>Admin password is set on first-time setup. To change it, "
         "clear the device's stored credentials.</p></div>";
     return server->send_page(
@@ -831,7 +950,6 @@ esp_err_t AdminWebServer::wifi_scan_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -910,8 +1028,20 @@ function table(a){
   tb.appendChild(tr);
  });
 }
-async function update(){try{const a=await (await fetch('/skyplot/data')).json();draw(a);table(a);}catch(e){}}
-update();setInterval(update,10000);
+let satBusy=false,satTimer=0;
+function satSchedule(ms){clearTimeout(satTimer);satTimer=setTimeout(update,ms);}
+async function update(){
+ if(satBusy)return;
+ if(document.hidden){satSchedule(60000);return;}
+ satBusy=true;
+ try{
+  const r=await fetch('/skyplot/data',{cache:'no-store'});
+  if(r.status===401){location.href='/login';return;}
+  if(r.ok){const a=await r.json();draw(a);table(a);}
+ }catch(e){}finally{satBusy=false;satSchedule(20000);}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)satSchedule(250);});
+update();
 </script>)HTML";
     return server->send_page(
         request, "Satellites", content, "/skyplot");
@@ -1063,7 +1193,6 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         }() + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -1336,6 +1465,7 @@ async function load(full=false){
  if(busy)return;busy=true;
  try{
   const r=await fetch(full||!cursor?'/logs/data':'/logs/data?since='+cursor,{cache:'no-store'});
+  if(r.status===401){location.href='/login';return;}
   if(r.ok){
    const atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
    const text=await r.text(),next=Number(r.headers.get('X-Log-Cursor')||0);
@@ -1353,7 +1483,16 @@ async function load(full=false){
 document.getElementById('refresh').onclick=()=>load(true);
 document.getElementById('bottom').onclick=()=>{pre.scrollTop=pre.scrollHeight;};
 load(true).then(()=>{pre.scrollTop=pre.scrollHeight;});
-setInterval(()=>{if(auto.checked)load();},5000);
+let logTimer=0;
+function logLoop(){
+ clearTimeout(logTimer);
+ logTimer=setTimeout(async()=>{
+  if(auto.checked&&!document.hidden)await load();
+  logLoop();
+ },document.hidden?60000:10000);
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)load();});
+logLoop();
 </script>)HTML";
     return server->send_page(
         request, "Console Logs", content, "/system");
@@ -1378,40 +1517,126 @@ esp_err_t AdminWebServer::logs_data_handler(httpd_req_t *request) {
     return httpd_resp_send(request, logs.text.c_str(), logs.text.size());
 }
 
-bool AdminWebServer::authorize(httpd_req_t *request) const {
+bool AdminWebServer::authorize(httpd_req_t *request) {
     if (!storage_->admin_password_set()) return false;
-    const std::string plain =
-        std::string(kAdminUser) + ":" + storage_->admin_password();
-    size_t encoded_size = 0;
-    mbedtls_base64_encode(
-        nullptr, 0, &encoded_size,
-        reinterpret_cast<const unsigned char *>(plain.data()), plain.size());
-    std::vector<unsigned char> encoded(encoded_size + 1);
-    if (mbedtls_base64_encode(
-            encoded.data(), encoded.size(), &encoded_size,
-            reinterpret_cast<const unsigned char *>(plain.data()),
-            plain.size()) != 0) {
+    const std::string token = cookie_value(request, kSessionCookieName);
+    if (token.empty() || session_token_.empty() || token != session_token_) {
         return false;
     }
-    const std::string expected =
-        "Basic " + std::string(reinterpret_cast<char *>(encoded.data()), encoded_size);
+    const int64_t now = esp_timer_get_time();
+    if (session_last_seen_us_ <= 0 ||
+        now - session_last_seen_us_ > kSessionIdleTimeoutUs) {
+        session_token_.clear();
+        session_last_seen_us_ = 0;
+        return false;
+    }
+    session_last_seen_us_ = now;
+    return true;
+}
 
-    size_t length = httpd_req_get_hdr_value_len(request, "Authorization");
-    if (length == 0) return false;
-    std::vector<char> header(length + 1);
-    if (httpd_req_get_hdr_value_str(
-            request, "Authorization", header.data(), header.size()) != ESP_OK) {
-        return false;
+bool AdminWebServer::password_matches(
+    const std::string &user, const std::string &password) const {
+    return storage_->admin_password_set() &&
+           user == kAdminUser &&
+           password == storage_->admin_password();
+}
+
+std::string AdminWebServer::start_session_cookie(bool secure) {
+    (void)secure;
+    std::string token;
+    token.reserve(32);
+    for (int i = 0; i < 4; ++i) {
+        char part[9]{};
+        snprintf(part, sizeof(part), "%08lx",
+                 static_cast<unsigned long>(esp_random()));
+        token += part;
     }
-    return expected == header.data();
+    session_token_ = token;
+    session_last_seen_us_ = esp_timer_get_time();
+    failed_login_count_ = 0;
+    login_block_until_us_ = 0;
+
+    std::string cookie = std::string(kSessionCookieName) + "=" + session_token_ +
+        "; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict";
+    ESP_LOGI(kTag, "Admin session started; previous session invalidated");
+    return cookie;
+}
+
+std::string AdminWebServer::clear_session_cookie(bool secure) {
+    (void)secure;
+    session_token_.clear();
+    session_last_seen_us_ = 0;
+    std::string cookie = std::string(kSessionCookieName) +
+        "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict";
+    return cookie;
 }
 
 esp_err_t AdminWebServer::send_unauthorized(httpd_req_t *request) const {
+    if (request->method == HTTP_GET && accepts_html(request)) {
+        std::string location = "/login";
+        const std::string uri = request->uri;
+        if (safe_local_path(uri) && uri != "/login") {
+            location += "?next=" + uri;
+        }
+        httpd_resp_set_status(request, "303 See Other");
+        httpd_resp_set_hdr(request, "Location", location.c_str());
+        httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+        return httpd_resp_send(request, nullptr, 0);
+    }
     httpd_resp_set_status(request, "401 Unauthorized");
-    httpd_resp_set_hdr(
-        request, "WWW-Authenticate", "Basic realm=\"GPS Base Station\"");
-    httpd_resp_set_hdr(request, "Connection", "close");
-    return httpd_resp_sendstr(request, "Authentication required");
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(request, "Login required");
+}
+
+esp_err_t AdminWebServer::send_login_page(
+    httpd_req_t *request, const std::string &message,
+    const std::string &next) const {
+    const bool night = storage_ ? storage_->night_mode() : true;
+    std::string page =
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<link rel='icon' href='data:,'><title>Admin Login</title>"
+        "<style>"
+        ":root{--bg:#05080B;--surface:#0D141B;--surface-hi:#142029;"
+        "--border:#203040;--text:#C9D6E0;--text-dim:#6E8294;--crit:#E0473F;"
+        "--accent:#1C7FCC;--font:'Segoe UI',system-ui,-apple-system,Roboto,"
+        "'Helvetica Neue',Arial,sans-serif}"
+        "[data-theme=day]{--bg:#0B1016;--surface:#16202B;--surface-hi:#1E2C3A;"
+        "--border:#2C4053;--text:#F2F6FA;--text-dim:#9DB0C2;--crit:#FF5A52;"
+        "--accent:#2FA4FF}"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;"
+        "place-items:center;background:var(--bg);color:var(--text);font-family:var(--font);"
+        "padding:20px;font-variant-numeric:tabular-nums}"
+        "main{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);"
+        "border-radius:12px;padding:24px}h1{font-size:21px;margin:0 0 6px}"
+        "p{color:var(--text-dim);line-height:1.4}.err{color:var(--crit);font-weight:600}"
+        "input{width:100%;padding:10px;margin:8px 0;background:var(--bg);color:var(--text);"
+        "border:1px solid var(--border);border-radius:8px}"
+        "button{width:100%;margin-top:10px;padding:10px 14px;background:var(--surface-hi);"
+        "color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer}"
+        "button:hover{border-color:var(--accent)}"
+        "</style></head><body data-theme='" +
+        std::string(night ? "night" : "day") + "'><main>"
+        "<h1>GPS Base Station</h1>"
+        "<p>Sign in to open the admin console. A new login replaces any active session.</p>";
+    if (!message.empty()) {
+        page += "<p class='err'>" + html_escape(message) + "</p>";
+    }
+    page +=
+        "<form method='post' action='/login'>"
+        "<input name='user' autocomplete='username' value='admin' required>"
+        "<input name='password' type='password' autocomplete='current-password' "
+        "placeholder='Password' required autofocus>"
+        "<input name='next' type='hidden' value='" + html_escape(next) + "'>"
+        "<button>Log In</button></form></main></body></html>";
+
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (request->handle == https_server_) {
+        httpd_resp_set_hdr(request, "Strict-Transport-Security", "max-age=3600");
+    }
+    return httpd_resp_send(request, page.c_str(), page.size());
 }
 
 // POST /theme?night=0|1 — persist the day/night choice to NVS so both surfaces agree.
@@ -1525,7 +1750,6 @@ esp_err_t AdminWebServer::send_page(
 
     httpd_resp_set_type(request, "text/html");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    httpd_resp_set_hdr(request, "Connection", "close");
     httpd_resp_set_hdr(request, "Strict-Transport-Security", "max-age=3600");
     esp_err_t result = send_chunks(request, kPrefix);
     if (result == ESP_OK) result = send_chunks(request, title);
@@ -1596,6 +1820,11 @@ std::string AdminWebServer::nav_html(const char *active_route) {
         "<span class='spacer'></span>"
         "<span id='navpill' class='pill idle'><span class='dot'></span>"
         "<span id='navpilltxt'>STATUS</span></span>"
+        "<a class='tbtn' id='logoutbtn' title='Log out' href='/logout' aria-label='Log out'>"
+        "<svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+        "<path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/>"
+        "<path d='M16 17l5-5-5-5'/><path d='M21 12H9'/></svg></a>"
         "<button class='tbtn' id='themebtn' title='Day / night' "
         "onclick='toggleTheme()'>"
         "<svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' "
@@ -1653,11 +1882,31 @@ std::string AdminWebServer::nav_html(const char *active_route) {
         "if(worst==='crit')setNavPill('crit','ALARM');"
         "else if(worst==='warn')setNavPill('warn',surveying?'SURVEYING':'WARN');"
         "else setNavPill('good','LIVE');}"
-        "var navBusy=false;"
-        "async function navPoll(){if(navBusy)return;navBusy=true;"
+        "window.__statusHandlers=[];window.__lastStatus=null;"
+        "window.onStatus=function(fn){window.__statusHandlers.push(fn);"
+        "if(window.__lastStatus)try{fn(window.__lastStatus);}catch(e){}};"
+        "function navDeliver(d){window.__lastStatus=d;navApplyStatus(d);"
+        "window.__statusHandlers.forEach(function(fn){try{fn(d);}catch(e){}});}"
+        "var navBusy=false,navTimer=0;"
+        "function navSchedule(ms){clearTimeout(navTimer);navTimer=setTimeout(navPoll,ms);}"
+        "window.refreshStatus=function(ms){navSchedule(ms||0);};"
+        "async function navPoll(){if(navBusy)return;"
+        "if(document.hidden){navSchedule(60000);return;}navBusy=true;"
         "try{var r=await fetch('/status',{cache:'no-store'});"
-        "if(r.ok)navApplyStatus(await r.json());}catch(e){}"
-        "finally{navBusy=false;setTimeout(navPoll,15000);}}"
+        "if(r.status===401){location.href='/login';return;}"
+        "if(r.ok)navDeliver(await r.json());}catch(e){}"
+        "finally{navBusy=false;navSchedule(30000);}}"
+        "document.addEventListener('visibilitychange',function(){if(!document.hidden)navSchedule(250);});"
+        "document.addEventListener('click',function(e){"
+        "var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;"
+        "if(a&&a.origin===location.origin)window.__gbsNavigating=true;},true);"
+        "document.addEventListener('submit',function(e){"
+        "var f=e.target;if(f&&(!f.action||f.action.indexOf(location.origin)===0||f.action.charAt(0)==='/'))"
+        "window.__gbsNavigating=true;},true);"
+        "window.addEventListener('pagehide',function(){"
+        "if(window.__gbsNavigating)return;"
+        "try{navigator.sendBeacon('/logout');}catch(e){"
+        "try{fetch('/logout',{method:'POST',keepalive:true,cache:'no-store'});}catch(x){}}});"
         "navPoll();"
         "</script>";
     return out;

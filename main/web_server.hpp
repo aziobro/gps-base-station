@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -27,8 +28,15 @@ private:
     SdManager *sd_ = nullptr;
     httpd_handle_t https_server_ = nullptr;
     httpd_handle_t http_server_ = nullptr;
+    std::string session_token_;
+    int64_t session_last_seen_us_ = 0;
+    uint32_t failed_login_count_ = 0;
+    int64_t login_block_until_us_ = 0;
 
     esp_err_t register_secure_handlers();
+    static esp_err_t login_get_handler(httpd_req_t *request);
+    static esp_err_t login_post_handler(httpd_req_t *request);
+    static esp_err_t logout_handler(httpd_req_t *request);
     static esp_err_t root_handler(httpd_req_t *request);
     static esp_err_t setup_get_handler(httpd_req_t *request);
     static esp_err_t setup_post_handler(httpd_req_t *request);
@@ -66,8 +74,14 @@ private:
     static esp_err_t rinex_export_page_handler(httpd_req_t *request);
     static esp_err_t rinex_export_handler(httpd_req_t *request);
 
-    bool authorize(httpd_req_t *request) const;
+    bool authorize(httpd_req_t *request);
+    bool password_matches(const std::string &user, const std::string &password) const;
+    std::string start_session_cookie(bool secure);
+    std::string clear_session_cookie(bool secure);
     esp_err_t send_unauthorized(httpd_req_t *request) const;
+    esp_err_t send_login_page(
+        httpd_req_t *request, const std::string &message = "",
+        const std::string &next = "/") const;
     // The web nav has SIX tabs (Dashboard/Position/Satellite/Links/Storage/
     // System) — one more than ui_sections::Section, which is shared with the touch
     // UI and frozen at 5. The active tab is therefore selected by matching the
