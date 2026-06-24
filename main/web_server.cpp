@@ -38,6 +38,18 @@ constexpr char kRawDataDir[] = "/sdcard/rawdata";
 constexpr int64_t kSessionIdleTimeoutUs = 60LL * 60LL * 1000000LL;
 constexpr int64_t kLoginBaseDelayUs = 5LL * 1000000LL;
 constexpr int64_t kLoginMaxDelayUs = 30LL * 1000000LL;
+constexpr size_t kRinexExportMaxChunkBytes = 2048;
+constexpr size_t kRinexExportSmallBytes = 1024 * 1024;
+constexpr size_t kRinexExportLargeBytes = 4 * 1024 * 1024;
+constexpr size_t kRinexHeaderScanLimit = 64 * 1024;
+constexpr int kRinexHeaderLineLimit = 512;
+constexpr int64_t kRinexProgressLogIntervalUs = 10LL * 1000000LL;
+constexpr int64_t kRinexSlowSendLogUs = 2LL * 1000000LL;
+constexpr int kPostExportStatusQuietMs = 120000;
+constexpr size_t kPostExportQuietBytes = kRinexExportLargeBytes;
+constexpr size_t kPageChunkBytes = 1024;
+constexpr int kPageChunkDelayMs = 3;
+constexpr int64_t kWebSlowSendLogUs = 2LL * 1000000LL;
 
 std::string header_value(httpd_req_t *request, const char *name, size_t max_len = 1024) {
     size_t length = httpd_req_get_hdr_value_len(request, name);
@@ -134,6 +146,175 @@ std::vector<std::string> select_rinex_files(time_t start, time_t end) {
     return paths;
 }
 
+const char *path_basename(const std::string &path) {
+    const char *slash = strrchr(path.c_str(), '/');
+    return slash ? slash + 1 : path.c_str();
+}
+
+bool rinex_label_equals(const char *line, size_t len, const char *label) {
+    return len >= 60 && strncmp(line + 60, label, strlen(label)) == 0;
+}
+
+struct RinexHeaderCheck {
+    bool ok = false;
+    size_t size_bytes = 0;
+    bool has_last_obs = false;
+    char last_obs_value[61] = {};
+    std::string error;
+};
+
+RinexHeaderCheck check_rinex_header(const std::string &path) {
+    RinexHeaderCheck check;
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        check.error = std::string(path_basename(path)) + ": file is missing or empty";
+        return check;
+    }
+    check.size_bytes = static_cast<size_t>(st.st_size);
+
+    FILE *file = fopen(path.c_str(), "r");
+    if (!file) {
+        check.error = std::string(path_basename(path)) + ": open failed";
+        return check;
+    }
+
+    bool has_version = false;
+    bool has_end = false;
+    size_t scanned = 0;
+    int lines = 0;
+    char line[192];
+    while (fgets(line, sizeof(line), file)) {
+        const size_t len = strlen(line);
+        ++lines;
+        scanned += len;
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n') {
+            check.error = std::string(path_basename(path)) + ": header line too long";
+            fclose(file);
+            return check;
+        }
+        if (rinex_label_equals(line, len, "RINEX VERSION / TYPE")) {
+            has_version = true;
+        }
+        if (rinex_label_equals(line, len, "TIME OF LAST OBS")) {
+            memcpy(check.last_obs_value, line, 60);
+            check.has_last_obs = true;
+        }
+        if (rinex_label_equals(line, len, "END OF HEADER")) {
+            has_end = true;
+            break;
+        }
+        if (scanned > kRinexHeaderScanLimit || lines > kRinexHeaderLineLimit) {
+            check.error = std::string(path_basename(path)) + ": header is too long";
+            fclose(file);
+            return check;
+        }
+    }
+    const bool read_error = ferror(file);
+    fclose(file);
+
+    if (read_error) {
+        check.error = std::string(path_basename(path)) + ": read failed";
+    } else if (!has_version) {
+        check.error = std::string(path_basename(path)) + ": missing RINEX header";
+    } else if (!has_end) {
+        check.error = std::string(path_basename(path)) + ": missing END OF HEADER";
+    } else {
+        check.ok = true;
+    }
+    return check;
+}
+
+bool selected_active_rinex_file(
+    const std::vector<std::string> &paths, const RinexLogger::Status &status) {
+    if (!status.active || status.current_file.empty()) return false;
+    return std::find(paths.begin(), paths.end(), status.current_file) != paths.end();
+}
+
+struct RinexExportPacing {
+    size_t chunk_bytes = kRinexExportMaxChunkBytes;
+    int delay_ms = 10;
+};
+
+struct RinexExportProgress {
+    uint32_t id = 0;
+    size_t source_bytes = 0;
+    size_t sent_bytes = 0;
+    int file_index = 0;
+    int file_count = 0;
+    const char *file_name = "";
+    const char *phase = "";
+    int64_t last_log_us = 0;
+};
+
+RinexExportPacing rinex_export_pacing(size_t total_bytes) {
+    if (total_bytes <= kRinexExportSmallBytes) {
+        return {kRinexExportMaxChunkBytes, 10};
+    }
+    if (total_bytes <= kRinexExportLargeBytes) {
+        return {1024, 50};
+    }
+    return {1024, 150};
+}
+
+void log_rinex_progress(const RinexExportProgress &progress, const char *label) {
+    ESP_LOGI(
+        kTag,
+        "RINEX export %08lx %s: sent=%zu source=%zu file=%d/%d %s phase=%s",
+        static_cast<unsigned long>(progress.id), label, progress.sent_bytes,
+        progress.source_bytes, progress.file_index, progress.file_count,
+        progress.file_name ? progress.file_name : "",
+        progress.phase ? progress.phase : "");
+}
+
+esp_err_t send_paced_chunk(
+    httpd_req_t *request, const char *data, size_t length, int delay_ms,
+    RinexExportProgress *progress) {
+    const int64_t before_us = esp_timer_get_time();
+    const esp_err_t err =
+        httpd_resp_send_chunk(request, data, static_cast<ssize_t>(length));
+    const int64_t elapsed_us = esp_timer_get_time() - before_us;
+    if (err != ESP_OK) {
+        if (progress) {
+            ESP_LOGW(
+                kTag,
+                "RINEX export %08lx send failed: %s chunk=%zu elapsed_ms=%lld "
+                "sent=%zu source=%zu file=%d/%d %s phase=%s",
+                static_cast<unsigned long>(progress->id), esp_err_to_name(err),
+                length, static_cast<long long>(elapsed_us / 1000),
+                progress->sent_bytes, progress->source_bytes,
+                progress->file_index, progress->file_count,
+                progress->file_name ? progress->file_name : "",
+                progress->phase ? progress->phase : "");
+        }
+        return err;
+    }
+    if (progress && length > 0) {
+        progress->sent_bytes += length;
+        const int64_t now_us = esp_timer_get_time();
+        if (progress->last_log_us == 0 ||
+            now_us - progress->last_log_us >= kRinexProgressLogIntervalUs) {
+            log_rinex_progress(*progress, "progress");
+            progress->last_log_us = now_us;
+        }
+        if (elapsed_us >= kRinexSlowSendLogUs) {
+            ESP_LOGW(
+                kTag,
+                "RINEX export %08lx slow send: chunk=%zu elapsed_ms=%lld "
+                "sent=%zu source=%zu file=%d/%d %s phase=%s",
+                static_cast<unsigned long>(progress->id), length,
+                static_cast<long long>(elapsed_us / 1000),
+                progress->sent_bytes, progress->source_bytes,
+                progress->file_index, progress->file_count,
+                progress->file_name ? progress->file_name : "",
+                progress->phase ? progress->phase : "");
+        }
+    }
+    if (err == ESP_OK && length > 0 && delay_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+    return err;
+}
+
 extern const unsigned char server_cert_start[]
     asm("_binary_server_cert_pem_start");
 extern const unsigned char server_cert_end[]
@@ -148,12 +329,27 @@ extern const unsigned char ca_cert_end[]
     asm("_binary_ca_cert_pem_end");
 
 esp_err_t send_chunks(httpd_req_t *request, std::string_view data) {
-    constexpr size_t kChunkSize = 1024;
-    for (size_t offset = 0; offset < data.size(); offset += kChunkSize) {
-        const size_t length = std::min(kChunkSize, data.size() - offset);
+    for (size_t offset = 0; offset < data.size(); offset += kPageChunkBytes) {
+        const size_t length = std::min(kPageChunkBytes, data.size() - offset);
+        const int64_t before_us = esp_timer_get_time();
         const esp_err_t result =
             httpd_resp_send_chunk(request, data.data() + offset, length);
-        if (result != ESP_OK) return result;
+        const int64_t elapsed_us = esp_timer_get_time() - before_us;
+        if (result != ESP_OK) {
+            ESP_LOGW(
+                kTag, "web chunk send failed: uri=%s err=%s len=%zu elapsed_ms=%lld",
+                request->uri, esp_err_to_name(result), length,
+                static_cast<long long>(elapsed_us / 1000));
+            return result;
+        }
+        if (elapsed_us >= kWebSlowSendLogUs) {
+            ESP_LOGW(
+                kTag, "web chunk send slow: uri=%s len=%zu elapsed_ms=%lld",
+                request->uri, length, static_cast<long long>(elapsed_us / 1000));
+        }
+        if (length > 0 && offset + length < data.size() && kPageChunkDelayMs > 0) {
+            vTaskDelay(pdMS_TO_TICKS(kPageChunkDelayMs));
+        }
     }
     return ESP_OK;
 }
@@ -268,14 +464,17 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.max_uri_handlers = 40;
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 5;
-    tls_config.httpd.send_wait_timeout = 5;
+    tls_config.httpd.send_wait_timeout = 2;
     tls_config.httpd.lru_purge_enable = true;
-    tls_config.httpd.backlog_conn = 2;
+    tls_config.httpd.backlog_conn = 1;
     // The web UI is an admin cockpit, not a multi-user service. Keep the socket
     // pool small, but avoid sticky keep-alive sockets: a browser can otherwise
     // occupy the whole pool and prevent a second browser from reaching /login to
     // take over the single active session.
-    tls_config.httpd.max_open_sockets = 4;
+    // One long transfer plus one short status/action request is enough for the
+    // single-user admin UI. More concurrent TLS sessions can exhaust AES DMA
+    // scratch buffers while exports are streaming.
+    tls_config.httpd.max_open_sockets = 2;
     tls_config.httpd.keep_alive_enable = false;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
@@ -354,6 +553,7 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/logs", HTTP_GET, logs_page_handler, this},
         {"/logs/data", HTTP_GET, logs_data_handler, this},
         {"/ca.crt", HTTP_GET, ca_certificate_handler, this},
+        {"/favicon.ico", HTTP_GET, favicon_handler, this},
         {"/files", HTTP_GET, files_page_handler, this},
         {"/files/list", HTTP_GET, files_list_handler, this},
         {"/files/download", HTTP_GET, files_download_handler, this},
@@ -394,6 +594,10 @@ esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
         std::string(request->uri) == "/ca.crt") {
         return ca_certificate_handler(request);
     }
+    if (request->method == HTTP_GET &&
+        std::string(request->uri) == "/favicon.ico") {
+        return favicon_handler(request);
+    }
     if (!server->wifi_->access_point_active()) {
         char host[96]{};
         if (httpd_req_get_hdr_value_str(
@@ -420,6 +624,7 @@ esp_err_t AdminWebServer::http_gateway_handler(httpd_req_t *request) {
         if (uri == "/wifi/scan") return wifi_scan_handler(request);
         if (uri == "/status") return status_handler(request);
         if (uri == "/ca.crt") return ca_certificate_handler(request);
+        if (uri == "/favicon.ico") return favicon_handler(request);
     } else if (request->method == HTTP_POST) {
         if (uri == "/login") return login_post_handler(request);
         if (uri == "/logout") return logout_handler(request);
@@ -441,6 +646,12 @@ esp_err_t AdminWebServer::ca_certificate_handler(httpd_req_t *request) {
     return httpd_resp_send(
         request, reinterpret_cast<const char *>(ca_cert_start),
         ca_cert_end - ca_cert_start - 1);
+}
+
+esp_err_t AdminWebServer::favicon_handler(httpd_req_t *request) {
+    httpd_resp_set_status(request, "204 No Content");
+    httpd_resp_set_hdr(request, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(request, nullptr, 0);
 }
 
 esp_err_t AdminWebServer::login_get_handler(httpd_req_t *request) {
@@ -1109,6 +1320,7 @@ esp_err_t AdminWebServer::config_post_handler(httpd_req_t *request) {
 esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
+    const int64_t started_us = esp_timer_get_time();
 
     const BasePosition position = server->storage_->load_position();
     const BaseStationStatus station = server->station_->status();
@@ -1224,7 +1436,19 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         }() + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, body.c_str(), body.size());
+    const esp_err_t result = httpd_resp_send(request, body.c_str(), body.size());
+    const int64_t elapsed_us = esp_timer_get_time() - started_us;
+    if (result != ESP_OK) {
+        ESP_LOGW(
+            kTag, "status send failed: err=%s len=%zu elapsed_ms=%lld",
+            esp_err_to_name(result), body.size(),
+            static_cast<long long>(elapsed_us / 1000));
+    } else if (elapsed_us >= kWebSlowSendLogUs) {
+        ESP_LOGW(
+            kTag, "status send slow: len=%zu elapsed_ms=%lld",
+            body.size(), static_cast<long long>(elapsed_us / 1000));
+    }
+    return result;
 }
 
 esp_err_t AdminWebServer::update_page_handler(httpd_req_t *request) {
@@ -1545,7 +1769,18 @@ esp_err_t AdminWebServer::logs_data_handler(httpd_req_t *request) {
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "X-Log-Cursor", cursor);
     httpd_resp_set_hdr(request, "X-Log-Truncated", logs.truncated ? "1" : "0");
-    return httpd_resp_send(request, logs.text.c_str(), logs.text.size());
+
+    constexpr size_t kLogChunk = 1024;
+    size_t offset = 0;
+    while (offset < logs.text.size()) {
+        const size_t n = std::min(kLogChunk, logs.text.size() - offset);
+        const esp_err_t err = httpd_resp_send_chunk(
+            request, logs.text.data() + offset, static_cast<ssize_t>(n));
+        if (err != ESP_OK) return err;
+        offset += n;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return httpd_resp_send_chunk(request, nullptr, 0);
 }
 
 bool AdminWebServer::authorize(httpd_req_t *request) {
@@ -1684,6 +1919,7 @@ esp_err_t AdminWebServer::theme_post_handler(httpd_req_t *request) {
 esp_err_t AdminWebServer::send_page(
     httpd_req_t *request, const char *title,
     const std::string &content, const char *active_route) const {
+    const int64_t started_us = esp_timer_get_time();
     static constexpr std::string_view kPrefix =
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1797,6 +2033,19 @@ esp_err_t AdminWebServer::send_page(
     if (result == ESP_OK) result = send_chunks(request, content);
     if (result == ESP_OK) result = send_chunks(request, kSuffix);
     if (result == ESP_OK) result = httpd_resp_send_chunk(request, nullptr, 0);
+    const int64_t elapsed_us = esp_timer_get_time() - started_us;
+    if (result != ESP_OK) {
+        ESP_LOGW(
+            kTag,
+            "page send failed: uri=%s title=%s active=%s err=%s elapsed_ms=%lld",
+            request->uri, title ? title : "", active_route ? active_route : "",
+            esp_err_to_name(result), static_cast<long long>(elapsed_us / 1000));
+    } else if (elapsed_us >= kWebSlowSendLogUs) {
+        ESP_LOGW(
+            kTag, "page send slow: uri=%s title=%s active=%s elapsed_ms=%lld",
+            request->uri, title ? title : "", active_route ? active_route : "",
+            static_cast<long long>(elapsed_us / 1000));
+    }
     return result;
 }
 
@@ -1921,7 +2170,11 @@ std::string AdminWebServer::nav_html(const char *active_route) {
         "var navBusy=false,navTimer=0;"
         "function navSchedule(ms){clearTimeout(navTimer);navTimer=setTimeout(navPoll,ms);}"
         "window.refreshStatus=function(ms){navSchedule(ms||0);};"
+        "function navQuiet(){if(window.__suspendStatusPoll)return true;"
+        "var u=window.__statusQuietUntil||0;"
+        "if(Date.now()<u)return true;if(u)window.__statusQuietUntil=0;return false;}"
         "async function navPoll(){if(navBusy)return;"
+        "if(navQuiet()){navSchedule(5000);return;}"
         "if(document.hidden){navSchedule(60000);return;}navBusy=true;"
         "try{var r=await fetch('/status',{cache:'no-store'});"
         "if(r.status===401){location.href='/login';return;}"
@@ -2956,6 +3209,7 @@ esp_err_t AdminWebServer::rinex_export_page_handler(httpd_req_t *request) {
         "st.style.color='var(--text-dim)';st.textContent='Connecting…';"
         "var t0=Date.now(),rx=0;"
         "var dots='';var dotTimer=setInterval(function(){dots=dots.length<3?dots+'.':'';btn.textContent='Exporting'+dots;},500);"
+        "window.__suspendStatusPoll=true;"
         "try{"
         "var resp=await fetch('/rinex/export',{method:'POST',"
         "headers:{'Content-Type':'application/json'},"
@@ -2972,18 +3226,22 @@ esp_err_t AdminWebServer::rinex_export_page_handler(httpd_req_t *request) {
         "var sec=Math.round((Date.now()-t0)/1000);"
         "st.textContent=fmtSize(rx)+' received — '+sec+'s elapsed — do not navigate away.';"
         "}"
-        "clearInterval(dotTimer);"
         "var blob=new Blob(chunks,{type:'application/octet-stream'});"
         "var fn='rinex_'+s.replace(/[T:]/g,'').replace(/-/g,'')+'.rnx';"
         "var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();URL.revokeObjectURL(a.href);"
         "st.style.color='var(--good)';"
         "st.textContent='✓ Done — '+fmtSize(blob.size)+' downloaded.';"
         "}catch(err){"
-        "clearInterval(dotTimer);"
         "st.style.color='var(--crit)';"
         "st.textContent='✗ '+err.message;"
-        "}"
+        "}finally{"
+        "clearInterval(dotTimer);"
+        "window.__statusQuietUntil=rx>=" +
+        std::to_string(kPostExportQuietBytes) +
+        "?Date.now()+" + std::to_string(kPostExportStatusQuietMs) + ":0;"
+        "window.__suspendStatusPoll=false;"
         "btn.disabled=false;btn.textContent='⇓ Export & Download';"
+        "}"
         "}"
         "</script>";
 
@@ -3027,43 +3285,84 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
             request, HTTPD_404_NOT_FOUND, "No RINEX files in range");
     }
 
-    // Read the TIME OF LAST OBS value field (columns 1–60) from the last file's
-    // header so we can patch it into the first file's header on output.
+    if (selected_active_rinex_file(paths, server->station_->rinex_status())) {
+        httpd_resp_set_status(request, "409 Conflict");
+        return httpd_resp_sendstr(
+            request,
+            "Selected range includes the RINEX file currently being written. "
+            "Stop RINEX logging or choose an earlier range.");
+    }
+
+    std::vector<RinexHeaderCheck> header_checks;
+    header_checks.reserve(paths.size());
+    size_t total_export_bytes = 0;
+    for (const std::string &path : paths) {
+        RinexHeaderCheck check = check_rinex_header(path);
+        if (!check.ok) {
+            httpd_resp_set_status(request, "422 Unprocessable Entity");
+            return httpd_resp_sendstr(request, check.error.c_str());
+        }
+        total_export_bytes += check.size_bytes;
+        header_checks.push_back(check);
+    }
+
+    // Read the TIME OF LAST OBS value field (columns 1-60) from the last file
+    // that has it so we can patch it into the first file's header on output.
     // RINEX 3 header lines: cols 1-60 = value, cols 61-80 = label.
     char last_obs_value[61] = {};  // 60 chars + NUL
-    {
-        FILE *lf = fopen(paths.back().c_str(), "r");
-        if (lf) {
-            char line[128];
-            while (fgets(line, sizeof(line), lf)) {
-                size_t len = strlen(line);
-                if (len >= 76 && strncmp(line + 60, "TIME OF LAST OBS", 16) == 0) {
-                    memcpy(last_obs_value, line, 60);
-                    break;
-                }
-                if (len >= 60 && strstr(line + 60, "END OF HEADER")) break;
-            }
-            fclose(lf);
+    for (auto it = header_checks.rbegin(); it != header_checks.rend(); ++it) {
+        if (it->has_last_obs) {
+            memcpy(last_obs_value, it->last_obs_value, 60);
+            break;
         }
     }
 
     httpd_resp_set_type(request, "application/octet-stream");
     httpd_resp_set_hdr(request, "Content-Disposition",
                        "attachment; filename=\"export.rnx\"");
+    char total_header[24];
+    snprintf(total_header, sizeof(total_header), "%zu", total_export_bytes);
+    httpd_resp_set_hdr(request, "X-RINEX-Source-Bytes", total_header);
 
-    // Keep export traffic below the point where SDIO/TLS can starve the
-    // outbound NTRIP sockets.
-    char buf[2048];
+    // Keep export traffic below the point where SDIO/TLS/AES DMA can starve the
+    // outbound NTRIP sockets or trigger hardware-AES alignment allocation errors.
+    const RinexExportPacing pacing = rinex_export_pacing(total_export_bytes);
+    RinexExportProgress progress;
+    progress.id = esp_random();
+    progress.source_bytes = total_export_bytes;
+    progress.file_count = static_cast<int>(paths.size());
+    progress.phase = "start";
+    ESP_LOGI(
+        kTag,
+        "RINEX export %08lx start: %u files, %zu source bytes, %zu-byte chunks, %d ms pacing",
+        static_cast<unsigned long>(progress.id),
+        static_cast<unsigned>(paths.size()), total_export_bytes,
+        pacing.chunk_bytes, pacing.delay_ms);
+    char buf[kRinexExportMaxChunkBytes];
     bool header_sent = false;
+    esp_err_t stream_err = ESP_OK;
 
-    for (const std::string &path : paths) {
+    for (size_t path_index = 0; path_index < paths.size(); ++path_index) {
+        const std::string &path = paths[path_index];
+        progress.file_index = static_cast<int>(path_index + 1);
+        progress.file_name = path_basename(path);
+        progress.phase = "open";
+        log_rinex_progress(progress, "file-start");
         FILE *f = fopen(path.c_str(), "r");
-        if (!f) continue;
+        if (!f) {
+            stream_err = ESP_FAIL;
+            ESP_LOGW(
+                kTag, "RINEX export %08lx open failed: %s errno=%d (%s)",
+                static_cast<unsigned long>(progress.id), progress.file_name,
+                errno, strerror(errno));
+            goto done;
+        }
 
         if (!header_sent) {
             // Stream first file's header line by line so we can patch
             // TIME OF LAST OBS, then bulk-read the observations.
             bool past_header = false;
+            progress.phase = "first-header";
             while (!past_header) {
                 if (!fgets(buf, sizeof(buf), f)) break;
                 size_t len = strlen(buf);
@@ -3077,51 +3376,116 @@ esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
                     int pl = snprintf(patched, sizeof(patched),
                                       "%sTIME OF LAST OBS    %s",
                                       last_obs_value, eol);
-                    if (httpd_resp_send_chunk(request, patched, pl) != ESP_OK) {
+                    if (pl < 0 ||
+                        send_paced_chunk(
+                            request, patched, static_cast<size_t>(pl),
+                            pacing.delay_ms, &progress) != ESP_OK) {
+                        stream_err = ESP_FAIL;
                         fclose(f);
                         goto done;
                     }
                 } else {
-                    if (httpd_resp_send_chunk(
-                            request, buf, static_cast<ssize_t>(len)) != ESP_OK) {
+                    stream_err = send_paced_chunk(
+                        request, buf, len, pacing.delay_ms, &progress);
+                    if (stream_err != ESP_OK) {
                         fclose(f);
                         goto done;
                     }
                 }
-                if (len >= 60 && strstr(buf + 60, "END OF HEADER")) past_header = true;
+                if (rinex_label_equals(buf, len, "END OF HEADER")) past_header = true;
+            }
+            if (ferror(f)) {
+                stream_err = ESP_FAIL;
+                ESP_LOGW(
+                    kTag, "RINEX export %08lx read failed: %s errno=%d (%s)",
+                    static_cast<unsigned long>(progress.id), progress.file_name,
+                    errno, strerror(errno));
+                fclose(f);
+                goto done;
             }
             // Bulk-stream the observations from the first file.
             size_t n;
-            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-                if (httpd_resp_send_chunk(
-                        request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
+            progress.phase = "first-observations";
+            while ((n = fread(buf, 1, pacing.chunk_bytes, f)) > 0) {
+                stream_err = send_paced_chunk(
+                    request, buf, n, pacing.delay_ms, &progress);
+                if (stream_err != ESP_OK) {
                     fclose(f);
                     goto done;
                 }
-                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (ferror(f)) {
+                stream_err = ESP_FAIL;
+                ESP_LOGW(
+                    kTag, "RINEX export %08lx read failed: %s errno=%d (%s)",
+                    static_cast<unsigned long>(progress.id), progress.file_name,
+                    errno, strerror(errno));
+                fclose(f);
+                goto done;
             }
             header_sent = true;
         } else {
             bool past_header = false;
+            progress.phase = "skip-header";
             while (!past_header && fgets(buf, sizeof(buf), f)) {
-                if (strstr(buf, "END OF HEADER")) past_header = true;
+                if (rinex_label_equals(buf, strlen(buf), "END OF HEADER")) {
+                    past_header = true;
+                }
+            }
+            if (ferror(f)) {
+                stream_err = ESP_FAIL;
+                ESP_LOGW(
+                    kTag, "RINEX export %08lx read failed: %s errno=%d (%s)",
+                    static_cast<unsigned long>(progress.id), progress.file_name,
+                    errno, strerror(errno));
+                fclose(f);
+                goto done;
             }
             if (past_header) {
                 size_t n;
-                while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-                    if (httpd_resp_send_chunk(
-                            request, buf, static_cast<ssize_t>(n)) != ESP_OK) {
+                progress.phase = "observations";
+                while ((n = fread(buf, 1, pacing.chunk_bytes, f)) > 0) {
+                    stream_err = send_paced_chunk(
+                        request, buf, n, pacing.delay_ms, &progress);
+                    if (stream_err != ESP_OK) {
                         fclose(f);
                         goto done;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                if (ferror(f)) {
+                    stream_err = ESP_FAIL;
+                    ESP_LOGW(
+                        kTag, "RINEX export %08lx read failed: %s errno=%d (%s)",
+                        static_cast<unsigned long>(progress.id),
+                        progress.file_name, errno, strerror(errno));
+                    fclose(f);
+                    goto done;
                 }
             }
         }
+        log_rinex_progress(progress, "file-done");
         fclose(f);
     }
 
 done:
-    httpd_resp_send_chunk(request, nullptr, 0);
-    return ESP_OK;
+    if (stream_err == ESP_OK) {
+        progress.phase = "complete";
+        log_rinex_progress(progress, "complete");
+        stream_err = httpd_resp_send_chunk(request, nullptr, 0);
+        if (stream_err != ESP_OK) {
+            ESP_LOGW(
+                kTag, "RINEX export %08lx final chunk failed: %s",
+                static_cast<unsigned long>(progress.id),
+                esp_err_to_name(stream_err));
+        }
+    } else {
+        ESP_LOGW(
+            kTag,
+            "RINEX export %08lx stopped: %s sent=%zu source=%zu file=%d/%d %s phase=%s",
+            static_cast<unsigned long>(progress.id), esp_err_to_name(stream_err),
+            progress.sent_bytes, progress.source_bytes, progress.file_index,
+            progress.file_count, progress.file_name ? progress.file_name : "",
+            progress.phase ? progress.phase : "");
+    }
+    return stream_err;
 }

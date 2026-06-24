@@ -90,7 +90,9 @@ private:
     void run();
     bool connect_caster();
     bool connect_socket();
-    bool send_all(const uint8_t *data, size_t length);
+    bool send_all(
+        const uint8_t *data, size_t length,
+        std::string *failure_reason = nullptr);
     std::string read_line(int timeout_ms);
     void drain_headers();
     void close_socket();

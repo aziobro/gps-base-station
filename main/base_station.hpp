@@ -102,8 +102,11 @@ private:
     std::atomic<int64_t> heartbeat_us_{0};
     static constexpr size_t kMaxRtcmFrame = 1200;
     std::array<uint8_t, kMaxRtcmFrame> rtcm_frame_{};
+    std::array<uint8_t, kMaxRtcmFrame> rtcm_batch_{};
     size_t rtcm_frame_length_ = 0;
     size_t rtcm_frame_expected_ = 0;
+    size_t rtcm_batch_length_ = 0;
+    int64_t rtcm_batch_started_us_ = 0;
 
     static void task_entry(void *argument);
     void run();
@@ -120,6 +123,8 @@ private:
     void read_data_uart_raw();
     void feed_rtcm_byte(uint8_t byte);
     void reset_rtcm_parser();
+    void reset_rtcm_batch();
+    void flush_rtcm_batch();
     void publish_rtcm_frame(const uint8_t *data, size_t length);
     static uint32_t rtcm_crc24q(const uint8_t *data, size_t length);
 };

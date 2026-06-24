@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 #include "app_config.hpp"
 #include "esp_check.h"
@@ -11,6 +12,7 @@
 namespace {
 
 constexpr char kTag[] = "base_station";
+constexpr int64_t kRtcmBatchUs = 200000;
 
 }  // namespace
 
@@ -285,6 +287,7 @@ void BaseStation::enter_survey(bool clear_position) {
     }
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
+    reset_rtcm_batch();
     survey_.start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_survey_output());
     ESP_LOGI(kTag, "Survey mode; all RTCM streams suspended");
@@ -296,6 +299,7 @@ void BaseStation::enter_transmit(double lat, double lon, double height) {
     survey_.reset();
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
+    reset_rtcm_batch();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_base(lat, lon, height));
     apply_stream_state();
     ESP_LOGI(kTag, "Base transmission mode");
@@ -310,6 +314,8 @@ void BaseStation::enter_raw_collection() {
     raw_collection_ = true;
     apply_stream_state();  // suspend all NTRIP/local streams
     uart_flush_input(data_uart_);
+    reset_rtcm_parser();
+    reset_rtcm_batch();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_raw_output());
     const BasePosition pos = storage_.load_position();
     rinex_logger_.start(pos.lat, pos.lon, pos.height,
@@ -327,6 +333,8 @@ void BaseStation::exit_raw_collection() {
     // until the first RTCM batch arrives (prevents empty connections to RTK2go).
     const BasePosition pos = storage_.load_position();
     has_rtcm_data_ = false;
+    reset_rtcm_parser();
+    reset_rtcm_batch();
     ESP_ERROR_CHECK_WITHOUT_ABORT(
         receiver_.configure_base(pos.lat, pos.lon, pos.height));
     apply_stream_state();
@@ -369,35 +377,6 @@ void BaseStation::read_data_uart_raw() {
     }
 }
 
-#if 0
-void BaseStation::read_data_uart() {
-    while (rtcm_batch_length_ < rtcm_batch_.size()) {
-        const int received = uart_read_bytes(
-            data_uart_, rtcm_batch_.data() + rtcm_batch_length_,
-            rtcm_batch_.size() - rtcm_batch_length_, 0);
-        if (received <= 0) break;
-        if (rtcm_batch_length_ == 0) {
-            rtcm_batch_started_us_ = esp_timer_get_time();
-        }
-        rtcm_batch_length_ += received;
-    }
-    if (rtcm_batch_length_ == 0) return;
-    if (rtcm_batch_length_ < rtcm_batch_.size() &&
-        esp_timer_get_time() - rtcm_batch_started_us_ < kRtcmBatchUs) {
-        return;
-    }
-    if (!has_rtcm_data_.exchange(true)) {
-        apply_stream_state();  // first RTCM batch — unsuspend push clients
-    }
-    local_caster_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtk2go_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    onocoy_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtkdata_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtcm_total_ += rtcm_batch_length_;
-    rtcm_batch_length_ = 0;
-}
-#endif
-
 void BaseStation::read_data_uart() {
     uint8_t buffer[256];
     int received = 0;
@@ -407,6 +386,11 @@ void BaseStation::read_data_uart() {
             feed_rtcm_byte(buffer[i]);
         }
     } while (received == static_cast<int>(sizeof(buffer)));
+
+    if (rtcm_batch_length_ > 0 &&
+        esp_timer_get_time() - rtcm_batch_started_us_ >= kRtcmBatchUs) {
+        flush_rtcm_batch();
+    }
 }
 
 void BaseStation::feed_rtcm_byte(uint8_t byte) {
@@ -460,15 +444,48 @@ void BaseStation::reset_rtcm_parser() {
     rtcm_frame_expected_ = 0;
 }
 
-void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
+void BaseStation::reset_rtcm_batch() {
+    rtcm_batch_length_ = 0;
+    rtcm_batch_started_us_ = 0;
+}
+
+void BaseStation::flush_rtcm_batch() {
+    if (rtcm_batch_length_ == 0) return;
     if (!has_rtcm_data_.exchange(true)) {
-        apply_stream_state();  // first valid RTCM frame unsuspends clients
+        apply_stream_state();  // first valid RTCM batch unsuspends clients
     }
-    local_caster_.push(data, length);
-    rtk2go_.push(data, length);
-    onocoy_.push(data, length);
-    rtkdata_.push(data, length);
-    rtcm_total_ += length;
+    local_caster_.push(rtcm_batch_.data(), rtcm_batch_length_);
+    rtk2go_.push(rtcm_batch_.data(), rtcm_batch_length_);
+    onocoy_.push(rtcm_batch_.data(), rtcm_batch_length_);
+    rtkdata_.push(rtcm_batch_.data(), rtcm_batch_length_);
+    rtcm_total_ += rtcm_batch_length_;
+    reset_rtcm_batch();
+}
+
+void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
+    if (!data || length == 0) return;
+    if (length > rtcm_batch_.size()) {
+        ESP_LOGW(kTag, "Dropped oversized RTCM frame: %u bytes",
+                 static_cast<unsigned>(length));
+        return;
+    }
+
+    const int64_t now = esp_timer_get_time();
+    if (rtcm_batch_length_ > 0 &&
+        rtcm_batch_length_ + length > rtcm_batch_.size()) {
+        flush_rtcm_batch();
+    }
+    if (rtcm_batch_length_ == 0) {
+        rtcm_batch_started_us_ = now;
+    }
+
+    memcpy(rtcm_batch_.data() + rtcm_batch_length_, data, length);
+    rtcm_batch_length_ += length;
+
+    if (rtcm_batch_length_ >= rtcm_batch_.size() ||
+        now - rtcm_batch_started_us_ >= kRtcmBatchUs) {
+        flush_rtcm_batch();
+    }
 }
 
 uint32_t BaseStation::rtcm_crc24q(const uint8_t *data, size_t length) {

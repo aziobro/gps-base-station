@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <vector>
@@ -19,6 +20,7 @@ namespace {
 constexpr char kTag[] = "ntrip_push";
 constexpr int kBaseRetryMs = 10000;
 constexpr int kMaxRetryMs = 120000;
+constexpr int kMaxSendStallSeconds = 8;
 
 int retry_delay_ms(int failures) {
     const int capped = std::clamp(failures, 1, 4);
@@ -188,12 +190,16 @@ void NtripPushClient::run() {
             failures = 0;
         }
         if (xQueueReceive(queue_, &packet, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            if (send_all(packet.data, packet.length)) {
+            std::string failure_reason;
+            if (send_all(packet.data, packet.length, &failure_reason)) {
                 last_send_us_ = esp_timer_get_time();
             } else {
                 ++reconnects_;
                 ++failures;
-                set_error("write failed; reconnecting");
+                set_error(
+                    failure_reason.empty()
+                        ? "write failed; reconnecting"
+                        : "write failed: " + failure_reason + "; reconnecting");
                 close_socket();
                 set_message("waiting to reconnect", false);
                 vTaskDelay(pdMS_TO_TICKS(retry_delay_ms(failures)));
@@ -231,9 +237,14 @@ bool NtripPushClient::connect_caster() {
                   "Content-Type: application/octet-stream\r\n"
                   "Connection: keep-alive\r\n\r\n";
     }
+    std::string failure_reason;
     if (!send_all(
-            reinterpret_cast<const uint8_t *>(request.data()), request.size())) {
-        set_error("handshake write failed");
+            reinterpret_cast<const uint8_t *>(request.data()), request.size(),
+            &failure_reason)) {
+        set_error(
+            failure_reason.empty()
+                ? "handshake write failed"
+                : "handshake write failed: " + failure_reason);
         close_socket();
         return false;
     }
@@ -322,7 +333,23 @@ bool NtripPushClient::connect_socket() {
     return true;
 }
 
-bool NtripPushClient::send_all(const uint8_t *data, size_t length) {
+bool NtripPushClient::send_all(
+    const uint8_t *data, size_t length, std::string *failure_reason) {
+    auto fail = [failure_reason](const std::string &reason) {
+        if (failure_reason) *failure_reason = reason;
+        return false;
+    };
+    auto fail_errno = [failure_reason](const char *prefix, int err) {
+        if (failure_reason) {
+            char message[96];
+            snprintf(
+                message, sizeof(message), "%s: errno %d (%s)",
+                prefix, err, strerror(err));
+            *failure_reason = message;
+        }
+        return false;
+    };
+
     size_t offset = 0;
     int stalled_seconds = 0;
     while (offset < length && socket_ >= 0 && !suspended_ && !stopping_) {
@@ -334,6 +361,7 @@ bool NtripPushClient::send_all(const uint8_t *data, size_t length) {
             stalled_seconds = 0;
             continue;
         }
+        if (sent == 0) return fail("socket closed");
         if (sent < 0 && errno == EINTR) continue;
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             fd_set write_set;
@@ -344,11 +372,17 @@ bool NtripPushClient::send_all(const uint8_t *data, size_t length) {
                 socket_ + 1, nullptr, &write_set, nullptr, &timeout);
             if (ready > 0) continue;
             if (ready < 0 && errno == EINTR) continue;
-            if (++stalled_seconds < 5) continue;
+            if (ready < 0) return fail_errno("select failed", errno);
+            if (++stalled_seconds < kMaxSendStallSeconds) continue;
+            return fail("socket write stalled");
         }
-        return false;
+        if (sent < 0) return fail_errno("send failed", errno);
+        return fail("socket write failed");
     }
-    return offset == length;
+    if (offset == length) return true;
+    if (suspended_) return fail("stream suspended");
+    if (stopping_) return fail("client stopping");
+    return fail("socket closed");
 }
 
 std::string NtripPushClient::read_line(int timeout_ms) {
