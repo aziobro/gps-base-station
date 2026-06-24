@@ -49,6 +49,8 @@ constexpr int kPostExportStatusQuietMs = 120000;
 constexpr size_t kPostExportQuietBytes = kRinexExportLargeBytes;
 constexpr size_t kPageChunkBytes = 1024;
 constexpr int kPageChunkDelayMs = 3;
+constexpr int kWebSendTimeoutSec = 2;
+constexpr int kRinexExportSendTimeoutSec = 12;
 constexpr int64_t kWebSlowSendLogUs = 2LL * 1000000LL;
 
 std::string header_value(httpd_req_t *request, const char *name, size_t max_len = 1024) {
@@ -228,6 +230,20 @@ bool selected_active_rinex_file(
     const std::vector<std::string> &paths, const RinexLogger::Status &status) {
     if (!status.active || status.current_file.empty()) return false;
     return std::find(paths.begin(), paths.end(), status.current_file) != paths.end();
+}
+
+void set_request_send_timeout(httpd_req_t *request, int seconds, const char *label) {
+    const int sock = httpd_req_to_sockfd(request);
+    if (sock < 0) {
+        ESP_LOGW(kTag, "%s: failed to get request socket", label);
+        return;
+    }
+    timeval tv{seconds, 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        ESP_LOGW(
+            kTag, "%s: failed to set send timeout to %d sec: errno %d (%s)",
+            label, seconds, errno, strerror(errno));
+    }
 }
 
 struct RinexExportPacing {
@@ -464,7 +480,7 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.max_uri_handlers = 40;
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 5;
-    tls_config.httpd.send_wait_timeout = 2;
+    tls_config.httpd.send_wait_timeout = kWebSendTimeoutSec;
     tls_config.httpd.lru_purge_enable = true;
     tls_config.httpd.backlog_conn = 1;
     // The web UI is an admin cockpit, not a multi-user service. Keep the socket
@@ -3254,6 +3270,8 @@ esp_err_t AdminWebServer::rinex_export_page_handler(httpd_req_t *request) {
 esp_err_t AdminWebServer::rinex_export_handler(httpd_req_t *request) {
     AdminWebServer *server = self(request);
     if (!server->authorize(request)) return server->send_unauthorized(request);
+    set_request_send_timeout(
+        request, kRinexExportSendTimeoutSec, "RINEX export");
 
     const std::string body = read_body(request, 256);
     if (body.empty()) {
