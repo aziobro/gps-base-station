@@ -11,7 +11,11 @@ CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
 CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
 CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
 CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
-CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=40000
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+# Avoid an endless P4 reboot loop if the C6/SDIO link wedges after a soft OTA
+# reboot. The transport still posts failure events; we keep the host alive long
+# enough to preserve logs and touchscreen diagnostics.
+# CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE is not set
 # Deeper host->slave TX queue so packets ride out a busy C6 (longer SDIO write
 # retry window) instead of being dropped at enqueue.
 CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=32

@@ -69,6 +69,7 @@ private:
     std::atomic<uint64_t> bytes_sent_{0};
     std::atomic<uint32_t> dropped_batches_{0};
     std::atomic<uint32_t> reconnects_{0};
+    std::atomic<bool> ever_connected_{false};
     // Microsecond timestamps (esp_timer) for connection uptime / send freshness.
     std::atomic<int64_t> connected_since_us_{0};
     std::atomic<int64_t> last_send_us_{0};

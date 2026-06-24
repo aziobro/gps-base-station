@@ -4,6 +4,7 @@
 # Native ESP-IDF build environment and generated files
 .tools/
 build/
+build-docker/
 sdkconfig
 sdkconfig.old
 

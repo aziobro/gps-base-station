@@ -26,6 +26,20 @@ An ESP32-P4-based GNSS RTK base station using the Unicore UM980 receiver. It est
 
 ---
 
+## Build
+
+The recommended repeatable build path on Windows is the Docker-based ESP-IDF
+environment documented in [docs/DOCKER_BUILD.md](docs/DOCKER_BUILD.md).
+
+```powershell
+.\tools\docker-build.ps1 build
+```
+
+Native ESP-IDF builds are still supported, but Docker keeps the build inside a
+short Linux path and avoids Windows toolchain/path quirks.
+
+---
+
 ## Hardware
 
 | Component | Notes |

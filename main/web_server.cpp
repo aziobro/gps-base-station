@@ -222,19 +222,18 @@ esp_err_t AdminWebServer::start(
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 30;
     tls_config.httpd.send_wait_timeout = 30;
-    tls_config.httpd.lru_purge_enable = true;
+    tls_config.httpd.lru_purge_enable = false;
     // Cap concurrent TLS sessions hard. On this board malloc()/std::string AND the
     // mbedtls/esp-aes DMA buffers all live in the SAME scarce internal SRAM, so every
     // extra simultaneous TLS handshake competes with page-building for it. At 8, a
     // browser's parallel connections + the /status poll + NTRIP exhausted internal
     // SRAM; with C++ exceptions off a failed alloc became abort() → a reboot loop
     // (esp-aes "Failed to allocate memory" / mbedtls -0x0084 just before each abort).
-    // 4 is ample for the admin panel; lru_purge recycles the LRU connection when busy.
-    tls_config.httpd.max_open_sockets = 4;
-    tls_config.httpd.keep_alive_enable = true;
-    tls_config.httpd.keep_alive_idle = 15;
-    tls_config.httpd.keep_alive_interval = 5;
-    tls_config.httpd.keep_alive_count = 2;
+    // Two sockets are enough for the admin page plus one polling request. The ESP32-P4
+    // AES/TLS path can still run out of internal DMA-capable memory during caster
+    // reconnects, so keep browser handshake concurrency deliberately low.
+    tls_config.httpd.max_open_sockets = 2;
+    tls_config.httpd.keep_alive_enable = false;
     tls_config.servercert = server_cert_start;
     tls_config.servercert_len = server_cert_end - server_cert_start;
     tls_config.prvtkey_pem = server_key_start;
@@ -502,7 +501,7 @@ async function refresh(){
   svclight('d-rtk-dot','d-rtk-rc',d.rtkdata);
   set('d-ntrip-sub',d.local_clients+' clients');
   // Position
-  if(d.position_valid){set('d-pos',d.survey_lat?d.survey_lat.toFixed(6)+', '+d.survey_lon.toFixed(6):'set');}
+  if(d.position_valid){set('d-pos',d.position_lat.toFixed(6)+', '+d.position_lon.toFixed(6));}
   else set('d-pos','not set');
   set('d-pos-sub',d.position_valid?'fixed base':'no fixed position');
   // SD / disk
@@ -739,7 +738,10 @@ esp_err_t AdminWebServer::position_page_handler(httpd_req_t *request) {
         "if(r.ok){var d=await r.json();"
         // Coordinate + height: the live solution (stored fixed base while in Base
         // TX, or the converging survey solution while surveying).
-        "if(d.survey_lat){pSet('p-coord',d.survey_lat.toFixed(7)+', '+d.survey_lon.toFixed(7));"
+        "if(d.mode==='base_tx'&&d.position_valid){"
+        "pSet('p-coord',d.position_lat.toFixed(7)+', '+d.position_lon.toFixed(7));"
+        "pSet('p-height','height '+d.position_height.toFixed(3)+' m');}"
+        "else if(d.survey_lat){pSet('p-coord',d.survey_lat.toFixed(7)+', '+d.survey_lon.toFixed(7));"
         "pSet('p-height','height '+d.survey_height.toFixed(3)+' m');}"
         "else{pSet('p-coord','not set');pSet('p-height','height --');}"
         // Base mode.
@@ -829,6 +831,7 @@ esp_err_t AdminWebServer::wifi_scan_handler(httpd_req_t *request) {
     body += "]";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -1040,6 +1043,9 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         ",\"onocoy\":" + provider_json(station.onocoy) +
         ",\"rtkdata\":" + provider_json(station.rtkdata) +
         ",\"position_valid\":" + (position.valid ? "true" : "false") +
+        ",\"position_lat\":" + std::to_string(position.lat) +
+        ",\"position_lon\":" + std::to_string(position.lon) +
+        ",\"position_height\":" + std::to_string(position.height) +
         [&]() {
             const bool m = server->sd_->is_mounted();
             const auto ds = server->sd_->disk_stats();
@@ -1057,6 +1063,7 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         }() + "}";
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     return httpd_resp_send(request, body.c_str(), body.size());
 }
 
@@ -1518,6 +1525,7 @@ esp_err_t AdminWebServer::send_page(
 
     httpd_resp_set_type(request, "text/html");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Connection", "close");
     httpd_resp_set_hdr(request, "Strict-Transport-Security", "max-age=3600");
     esp_err_t result = send_chunks(request, kPrefix);
     if (result == ESP_OK) result = send_chunks(request, title);

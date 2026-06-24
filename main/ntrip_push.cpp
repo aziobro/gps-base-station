@@ -239,6 +239,7 @@ bool NtripPushClient::connect_caster() {
         return false;
     }
     if (response.rfind("HTTP/", 0) == 0) drain_headers();
+    if (ever_connected_.exchange(true)) ++reconnects_;
     connected_since_us_ = esp_timer_get_time();
     set_message(
         protocol_ == NtripProtocol::kV2 ? "connected (v2)" : "connected (v1)",

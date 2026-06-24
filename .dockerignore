@@ -1,0 +1,6 @@
+.git
+.pio
+.tools
+build
+build-docker
+tools/local-bin
