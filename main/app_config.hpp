@@ -16,7 +16,10 @@ inline constexpr int kRtcmBasePositionRateSec = 5;
 inline constexpr int kRtcmGpsRateSec = 1;
 inline constexpr int kRtcmGlonassRateSec = 1;
 inline constexpr int kRtcmGalileoRateSec = 1;
+inline constexpr int kRtcmQzssRateSec = 1;
 inline constexpr int kRtcmBeidouRateSec = 1;
+inline constexpr int kRtcmNavicRateSec = 1;
+inline constexpr int kRtcmGlonassBiasRateSec = 30;
 
 inline constexpr uint16_t kLocalNtripPort = 2101;
 inline constexpr char kLocalMountpoint[] = "BASE0";

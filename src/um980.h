@@ -29,16 +29,25 @@ void um980Init(HardwareSerial &ser, double lat, double lon, double height) {
     snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1005 ONTIME %d", RTCM_RATE_BASE_POS);
     um980Cmd(ser, cmd);
 
-    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1074 ONTIME %d", RTCM_RATE_GPS);
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1077 ONTIME %d", RTCM_RATE_GPS);
     um980Cmd(ser, cmd);
 
-    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1084 ONTIME %d", RTCM_RATE_GLO);
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1087 ONTIME %d", RTCM_RATE_GLO);
     um980Cmd(ser, cmd);
 
-    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1094 ONTIME %d", RTCM_RATE_GAL);
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1097 ONTIME %d", RTCM_RATE_GAL);
     um980Cmd(ser, cmd);
 
-    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1124 ONTIME %d", RTCM_RATE_BDS);
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1117 ONTIME %d", RTCM_RATE_QZSS);
+    um980Cmd(ser, cmd);
+
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1127 ONTIME %d", RTCM_RATE_BDS);
+    um980Cmd(ser, cmd);
+
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1137 ONTIME %d", RTCM_RATE_NAVIC);
+    um980Cmd(ser, cmd);
+
+    snprintf(cmd, sizeof(cmd), "LOG COM3 RTCM1230 ONTIME %d", RTCM_RATE_GLO_BIAS);
     um980Cmd(ser, cmd);
 
     // Satellite feedback on COM2 — constellation counts + individual azimuth/elevation/SNR

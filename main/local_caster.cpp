@@ -166,8 +166,8 @@ void LocalCaster::accept_client() {
             "SOURCETABLE 200 OK\r\n"
             "Content-Type: text/plain\r\n\r\n"
             "STR;" + std::string(config::kLocalMountpoint) +
-            ";GPS Base;RTCM 3.2;1005(5),1074(1),1084(1),1094(1),1124(1);"
-            "2;GPS+GLO+GAL+BDS;NONE;0;0;N;N;0;\r\nENDSOURCETABLE\r\n";
+            ";GPS Base;RTCM 3.2;1005(5),1077(1),1087(1),1097(1),1117(1),1127(1),1137(1),1230(30);"
+            "2;GPS+GLO+GAL+QZSS+BDS+NAVIC;NONE;0;0;N;N;0;\r\nENDSOURCETABLE\r\n";
         send_all(
             incoming, reinterpret_cast<const uint8_t *>(table.data()),
             table.size());

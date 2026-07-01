@@ -98,7 +98,10 @@
 // RTCM message output rates on UM980 COM3 (interval in seconds)
 // =============================================================================
 #define RTCM_RATE_BASE_POS  5   // 1005  – base antenna position
-#define RTCM_RATE_GPS       1   // 1074  – GPS MSM4
-#define RTCM_RATE_GLO       1   // 1084  – GLONASS MSM4
-#define RTCM_RATE_GAL       1   // 1094  – Galileo MSM4
-#define RTCM_RATE_BDS       1   // 1124  – BeiDou MSM4
+#define RTCM_RATE_GPS       1   // 1077  – GPS MSM7
+#define RTCM_RATE_GLO       1   // 1087  – GLONASS MSM7
+#define RTCM_RATE_GAL       1   // 1097  – Galileo MSM7
+#define RTCM_RATE_QZSS      1   // 1117  – QZSS MSM7
+#define RTCM_RATE_BDS       1   // 1127  – BeiDou MSM7
+#define RTCM_RATE_NAVIC     1   // 1137  – NavIC/IRNSS MSM7
+#define RTCM_RATE_GLO_BIAS 30   // 1230  – GLONASS code-phase bias

@@ -262,8 +262,8 @@ private:
 
     void sendSourceTable(WiFiClient &client) {
         String entry = "STR;" + String(NTRIP_MOUNTPOINT) +
-                       ";BASE;RTCM 3.2;1005(5),1074(1),1084(1),1094(1),1124(1)"
-                       ";2;GPS+GLO+GAL+BDS;NONE;NONE;0;0;ESP32;NONE;0;0;1;0;xN;N;0\r\n";
+                       ";BASE;RTCM 3.2;1005(5),1077(1),1087(1),1097(1),1117(1),1127(1),1137(1),1230(30)"
+                       ";2;GPS+GLO+GAL+QZSS+BDS+NAVIC;NONE;NONE;0;0;ESP32;NONE;0;0;1;0;xN;N;0\r\n";
         String body = entry + "ENDSOURCETABLE\r\n";
         client.print("SOURCETABLE 200 OK\r\n");
         client.print("Content-Type: text/plain\r\n");

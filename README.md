@@ -280,7 +280,7 @@ On first boot (or after pressing **Start New Survey-in**), the device enters sur
 Once a position is stored, the device:
 
 - Configures the UM980 as a fixed base at the surveyed position
-- Streams RTCM3 messages (1005/1074/1084/1094/1124) from UM980 COM3
+- Streams Onocoy-preferred RTCM3 messages (1005/1077/1087/1097/1117/1127/1137/1230) from UM980 COM3
 - Pushes data concurrently to enabled NTRIP services via FreeRTOS tasks
 - Serves RTCM to local rovers via the built-in NTRIP caster on port 2101
 
@@ -289,12 +289,15 @@ Once a position is stored, the device:
 | Message | Constellation | Rate |
 |---------|---------------|------|
 | 1005 | Base position | Every 5 s |
-| 1074 | GPS MSM4 | Every 1 s |
-| 1084 | GLONASS MSM4 | Every 1 s |
-| 1094 | Galileo MSM4 | Every 1 s |
-| 1124 | BeiDou MSM4 | Every 1 s |
+| 1077 | GPS MSM7 | Every 1 s |
+| 1087 | GLONASS MSM7 | Every 1 s |
+| 1097 | Galileo MSM7 | Every 1 s |
+| 1117 | QZSS MSM7 | Every 1 s |
+| 1127 | BeiDou MSM7 | Every 1 s |
+| 1137 | NavIC/IRNSS MSM7 | Every 1 s |
+| 1230 | GLONASS code-phase bias | Every 30 s |
 
-Typical throughput: **~850–950 B/s** (~7 kbps) with good satellite visibility.
+Typical throughput depends on sky visibility and supported regional systems; MSM7 is larger than MSM4 but provides the richer observations Onocoy requests for station quality scoring.
 
 ---
 

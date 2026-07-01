@@ -87,17 +87,26 @@ esp_err_t Um980::configure_base(double lat, double lon, double height) {
                  config::kRtcmBasePositionRateSec),
         kTag, "RTCM1005 failed");
     ESP_RETURN_ON_ERROR(
-        commandf("LOG COM3 RTCM1074 ONTIME %d", config::kRtcmGpsRateSec),
-        kTag, "RTCM1074 failed");
+        commandf("LOG COM3 RTCM1077 ONTIME %d", config::kRtcmGpsRateSec),
+        kTag, "RTCM1077 failed");
     ESP_RETURN_ON_ERROR(
-        commandf("LOG COM3 RTCM1084 ONTIME %d", config::kRtcmGlonassRateSec),
-        kTag, "RTCM1084 failed");
+        commandf("LOG COM3 RTCM1087 ONTIME %d", config::kRtcmGlonassRateSec),
+        kTag, "RTCM1087 failed");
     ESP_RETURN_ON_ERROR(
-        commandf("LOG COM3 RTCM1094 ONTIME %d", config::kRtcmGalileoRateSec),
-        kTag, "RTCM1094 failed");
+        commandf("LOG COM3 RTCM1097 ONTIME %d", config::kRtcmGalileoRateSec),
+        kTag, "RTCM1097 failed");
     ESP_RETURN_ON_ERROR(
-        commandf("LOG COM3 RTCM1124 ONTIME %d", config::kRtcmBeidouRateSec),
-        kTag, "RTCM1124 failed");
+        commandf("LOG COM3 RTCM1117 ONTIME %d", config::kRtcmQzssRateSec),
+        kTag, "RTCM1117 failed");
+    ESP_RETURN_ON_ERROR(
+        commandf("LOG COM3 RTCM1127 ONTIME %d", config::kRtcmBeidouRateSec),
+        kTag, "RTCM1127 failed");
+    ESP_RETURN_ON_ERROR(
+        commandf("LOG COM3 RTCM1137 ONTIME %d", config::kRtcmNavicRateSec),
+        kTag, "RTCM1137 failed");
+    ESP_RETURN_ON_ERROR(
+        commandf("LOG COM3 RTCM1230 ONTIME %d", config::kRtcmGlonassBiasRateSec),
+        kTag, "RTCM1230 failed");
     ESP_RETURN_ON_ERROR(
         configure_satellite_output(), kTag, "Satellite output failed");
     ESP_RETURN_ON_ERROR(command("SAVECONFIG"), kTag, "Save config failed");
