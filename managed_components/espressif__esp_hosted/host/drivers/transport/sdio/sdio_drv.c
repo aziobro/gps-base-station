@@ -209,6 +209,7 @@ static uint8_t *sdio_tx_dma_bounce_buf;
  * whichever next allocates successfully logs OOM end and clears the flag.
  * Touched only from the rx and tx tasks. */
 static bool mempool_oom_logged = false;
+static uint32_t sdio_wifi_rx_copy_oom_count;
 
 // one-time trigger to start write thread
 static bool sdio_start_write_thread = false;
@@ -222,6 +223,39 @@ typedef struct {
 	uint8_t * buf;
 	uint32_t buf_size;
 } buf_info_t;
+
+static uint8_t *sdio_alloc_wifi_rx_copy(uint16_t len)
+{
+	uint8_t *copy_payload = NULL;
+
+#if CONFIG_SPIRAM
+	copy_payload = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+	if (!copy_payload) {
+		copy_payload = (uint8_t *)g_h.funcs->_h_malloc(len);
+	}
+
+	return copy_payload;
+}
+
+static void sdio_log_wifi_rx_copy_oom(uint16_t len, uint8_t if_type)
+{
+	sdio_wifi_rx_copy_oom_count++;
+	if (sdio_wifi_rx_copy_oom_count > 5 && (sdio_wifi_rx_copy_oom_count % 100) != 0) {
+		return;
+	}
+	ESP_LOGW(TAG,
+			"drop hosted WiFi RX packet: alloc failed len=%u if=%u drops=%lu "
+			"free_8bit=%lu largest_8bit=%lu free_internal=%lu "
+			"largest_internal=%lu free_spiram=%lu largest_spiram=%lu",
+			len, if_type, (unsigned long)sdio_wifi_rx_copy_oom_count,
+			(unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+			(unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+			(unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+			(unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+			(unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+			(unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
 
 typedef struct {
 	buf_info_t buffer[2];
@@ -1399,11 +1433,14 @@ static void sdio_process_rx_task(void const* pvParameters)
 				(buf_handle->if_type == ESP_AP_IF)) {
 #if 1
 			if (chan_arr[buf_handle->if_type] && chan_arr[buf_handle->if_type]->rx) {
-				/* TODO : Need to abstract heap_caps_malloc */
-				uint8_t * copy_payload = (uint8_t *)g_h.funcs->_h_malloc(buf_handle->payload_len);
-				assert(copy_payload);
 				assert(buf_handle->payload_len);
 				assert(buf_handle->payload);
+				uint8_t * copy_payload = sdio_alloc_wifi_rx_copy(buf_handle->payload_len);
+				if (!copy_payload) {
+					sdio_log_wifi_rx_copy_oom(buf_handle->payload_len, buf_handle->if_type);
+					H_FREE_PTR_WITH_FUNC(buf_handle->free_buf_handle, buf_handle->priv_buffer_handle);
+					continue;
+				}
 				memcpy(copy_payload, buf_handle->payload, buf_handle->payload_len);
 				H_FREE_PTR_WITH_FUNC(buf_handle->free_buf_handle, buf_handle->priv_buffer_handle);
 
