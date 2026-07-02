@@ -3,6 +3,7 @@
 #include <atomic>
 #include <array>
 #include <cstdint>
+#include <functional>
 
 #include "driver/uart.h"
 #include "esp_err.h"
@@ -102,11 +103,22 @@ private:
     std::atomic<int64_t> heartbeat_us_{0};
     static constexpr size_t kMaxRtcmFrame = 1200;
     std::array<uint8_t, kMaxRtcmFrame> rtcm_frame_{};
-    std::array<uint8_t, kMaxRtcmFrame> rtcm_batch_{};
     size_t rtcm_frame_length_ = 0;
     size_t rtcm_frame_expected_ = 0;
-    size_t rtcm_batch_length_ = 0;
-    int64_t rtcm_batch_started_us_ = 0;
+
+    // Per-destination RTCM batch, each flushed on its own ~200ms cadence
+    // phase-offset from the others (kRtcmStaggerUs in base_station.cpp) so
+    // the local caster and three NTRIP casters don't all attempt to send
+    // over the shared WiFi/SDIO link in the same instant every cycle.
+    struct RtcmBatch {
+        std::array<uint8_t, kMaxRtcmFrame> data{};
+        size_t length = 0;
+        int64_t next_flush_us = 0;  // 0 = not yet armed
+    };
+    RtcmBatch local_batch_;
+    RtcmBatch rtk2go_batch_;
+    RtcmBatch onocoy_batch_;
+    RtcmBatch rtkdata_batch_;
 
     static void task_entry(void *argument);
     void run();
@@ -124,7 +136,11 @@ private:
     void feed_rtcm_byte(uint8_t byte);
     void reset_rtcm_parser();
     void reset_rtcm_batch();
-    void flush_rtcm_batch();
+    void publish_to_batch(RtcmBatch &batch, const uint8_t *data, size_t length,
+                           int64_t now, int64_t phase_offset_us,
+                           const std::function<void(const uint8_t *, size_t)> &flush);
+    void flush_due_batch(RtcmBatch &batch, int64_t now,
+                          const std::function<void(const uint8_t *, size_t)> &flush);
     void publish_rtcm_frame(const uint8_t *data, size_t length);
     static uint32_t rtcm_crc24q(const uint8_t *data, size_t length);
 };

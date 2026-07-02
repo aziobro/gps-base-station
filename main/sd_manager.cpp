@@ -104,7 +104,6 @@ esp_err_t SdManager::mount() {
         .data7_io_num = -1,
         .data_io_default_level = false,
         .max_transfer_sz = 4096,
-        .dma_burst_size = 0,
         .flags = 0,
         .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
         .intr_flags = 0,

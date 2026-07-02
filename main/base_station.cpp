@@ -13,6 +13,10 @@ namespace {
 
 constexpr char kTag[] = "base_station";
 constexpr int64_t kRtcmBatchUs = 200000;
+// Even quarter-period spacing across the 4 RTCM destinations (local caster +
+// 3 NTRIP casters) so their flushes land at different instants within each
+// 200ms cycle instead of all firing together.
+constexpr int64_t kRtcmStaggerUs = kRtcmBatchUs / 4;
 
 }  // namespace
 
@@ -387,10 +391,15 @@ void BaseStation::read_data_uart() {
         }
     } while (received == static_cast<int>(sizeof(buffer)));
 
-    if (rtcm_batch_length_ > 0 &&
-        esp_timer_get_time() - rtcm_batch_started_us_ >= kRtcmBatchUs) {
-        flush_rtcm_batch();
-    }
+    const int64_t now = esp_timer_get_time();
+    flush_due_batch(local_batch_, now,
+                     [this](const uint8_t *d, size_t n) { local_caster_.push(d, n); });
+    flush_due_batch(rtk2go_batch_, now,
+                     [this](const uint8_t *d, size_t n) { rtk2go_.push(d, n); });
+    flush_due_batch(onocoy_batch_, now,
+                     [this](const uint8_t *d, size_t n) { onocoy_.push(d, n); });
+    flush_due_batch(rtkdata_batch_, now,
+                     [this](const uint8_t *d, size_t n) { rtkdata_.push(d, n); });
 }
 
 void BaseStation::feed_rtcm_byte(uint8_t byte) {
@@ -445,47 +454,74 @@ void BaseStation::reset_rtcm_parser() {
 }
 
 void BaseStation::reset_rtcm_batch() {
-    rtcm_batch_length_ = 0;
-    rtcm_batch_started_us_ = 0;
+    local_batch_.length = 0;
+    local_batch_.next_flush_us = 0;
+    rtk2go_batch_.length = 0;
+    rtk2go_batch_.next_flush_us = 0;
+    onocoy_batch_.length = 0;
+    onocoy_batch_.next_flush_us = 0;
+    rtkdata_batch_.length = 0;
+    rtkdata_batch_.next_flush_us = 0;
 }
 
-void BaseStation::flush_rtcm_batch() {
-    if (rtcm_batch_length_ == 0) return;
-    if (!has_rtcm_data_.exchange(true)) {
-        apply_stream_state();  // first valid RTCM batch unsuspends clients
+void BaseStation::publish_to_batch(
+    RtcmBatch &batch, const uint8_t *data, size_t length, int64_t now,
+    int64_t phase_offset_us,
+    const std::function<void(const uint8_t *, size_t)> &flush) {
+    if (batch.length > 0 && batch.length + length > batch.data.size()) {
+        flush(batch.data.data(), batch.length);
+        batch.length = 0;
+        batch.next_flush_us = now + kRtcmBatchUs;
     }
-    local_caster_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtk2go_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    onocoy_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtkdata_.push(rtcm_batch_.data(), rtcm_batch_length_);
-    rtcm_total_ += rtcm_batch_length_;
-    reset_rtcm_batch();
+    memcpy(batch.data.data() + batch.length, data, length);
+    batch.length += length;
+    if (batch.next_flush_us == 0) {
+        // First batch for this destination: arm its recurring schedule
+        // offset by phase_offset_us so it doesn't land on the same instant
+        // as the other destinations. Every later flush reschedules itself
+        // kRtcmBatchUs after whenever it actually fired, which preserves
+        // this initial stagger indefinitely.
+        batch.next_flush_us = now + phase_offset_us + kRtcmBatchUs;
+    }
+    if (batch.length >= batch.data.size() || now >= batch.next_flush_us) {
+        flush(batch.data.data(), batch.length);
+        batch.length = 0;
+        batch.next_flush_us = now + kRtcmBatchUs;
+    }
+}
+
+void BaseStation::flush_due_batch(
+    RtcmBatch &batch, int64_t now,
+    const std::function<void(const uint8_t *, size_t)> &flush) {
+    if (batch.length > 0 && batch.next_flush_us != 0 &&
+        now >= batch.next_flush_us) {
+        flush(batch.data.data(), batch.length);
+        batch.length = 0;
+        batch.next_flush_us = now + kRtcmBatchUs;
+    }
 }
 
 void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
     if (!data || length == 0) return;
-    if (length > rtcm_batch_.size()) {
+    if (length > kMaxRtcmFrame) {
         ESP_LOGW(kTag, "Dropped oversized RTCM frame: %u bytes",
                  static_cast<unsigned>(length));
         return;
     }
+    if (!has_rtcm_data_.exchange(true)) {
+        apply_stream_state();  // first valid RTCM frame unsuspends clients
+    }
 
     const int64_t now = esp_timer_get_time();
-    if (rtcm_batch_length_ > 0 &&
-        rtcm_batch_length_ + length > rtcm_batch_.size()) {
-        flush_rtcm_batch();
-    }
-    if (rtcm_batch_length_ == 0) {
-        rtcm_batch_started_us_ = now;
-    }
-
-    memcpy(rtcm_batch_.data() + rtcm_batch_length_, data, length);
-    rtcm_batch_length_ += length;
-
-    if (rtcm_batch_length_ >= rtcm_batch_.size() ||
-        now - rtcm_batch_started_us_ >= kRtcmBatchUs) {
-        flush_rtcm_batch();
-    }
+    publish_to_batch(local_batch_, data, length, now, 0,
+                      [this](const uint8_t *d, size_t n) { local_caster_.push(d, n); });
+    publish_to_batch(rtk2go_batch_, data, length, now, kRtcmStaggerUs,
+                      [this](const uint8_t *d, size_t n) { rtk2go_.push(d, n); });
+    publish_to_batch(onocoy_batch_, data, length, now, kRtcmStaggerUs * 2,
+                      [this](const uint8_t *d, size_t n) { onocoy_.push(d, n); });
+    publish_to_batch(rtkdata_batch_, data, length, now, kRtcmStaggerUs * 3,
+                      [this](const uint8_t *d, size_t n) { rtkdata_.push(d, n); });
+    rtcm_total_ += length;
 }
 
 uint32_t BaseStation::rtcm_crc24q(const uint8_t *data, size_t length) {

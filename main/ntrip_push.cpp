@@ -187,12 +187,19 @@ void NtripPushClient::run() {
                 vTaskDelay(pdMS_TO_TICKS(retry_delay_ms(failures)));
                 continue;
             }
-            failures = 0;
+            // Do NOT reset `failures` here — a successful handshake doesn't
+            // prove the connection can carry data. Reset only once a send
+            // actually succeeds below, so a repeated handshake-then-stall
+            // pattern (a caster accepting the connection but the write path
+            // stalling every time) escalates the backoff instead of retrying
+            // at a flat ~10-15s cadence forever, which is what turned a
+            // transient stall into an RTK2go abuse-prevention ban.
         }
         if (xQueueReceive(queue_, &packet, pdMS_TO_TICKS(1000)) == pdTRUE) {
             std::string failure_reason;
             if (send_all(packet.data, packet.length, &failure_reason)) {
                 last_send_us_ = esp_timer_get_time();
+                failures = 0;
             } else {
                 ++reconnects_;
                 ++failures;

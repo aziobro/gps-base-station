@@ -23,6 +23,13 @@ CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=32
 # Without this, ~47KB of DMA-capable internal SRAM is consumed before the main
 # task can be created, leaving insufficient space for the 10KB main task stack.
 CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+# Periodic esp_hosted TX/RX/drop counters + heap watermarks (vendor-provided,
+# see host/utils/stats.c), to diagnose multi-hour SDIO/C6 TX stalls that
+# starve every outbound NTRIP socket at once (2026-07-02 RTK2go ban incident).
+# sta_tx_flowctrl_drop = dropped because the C6 asserted START_THROTTLE;
+# sta_tx_out_drop = dropped because the C6 reported no free TX buffer credits.
+CONFIG_ESP_HOSTED_PKT_STATS=y
+CONFIG_ESP_HOSTED_PKT_STATS_INTERVAL_SEC=60
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_COMPILER_CXX_RTTI=n
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240

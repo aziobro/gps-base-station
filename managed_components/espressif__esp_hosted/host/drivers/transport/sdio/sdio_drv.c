@@ -210,6 +210,7 @@ static uint8_t *sdio_tx_dma_bounce_buf;
  * Touched only from the rx and tx tasks. */
 static bool mempool_oom_logged = false;
 static uint32_t sdio_wifi_rx_copy_oom_count;
+static uint32_t sdio_tx_buf_unavailable_count;
 
 // one-time trigger to start write thread
 static bool sdio_start_write_thread = false;
@@ -255,6 +256,23 @@ static void sdio_log_wifi_rx_copy_oom(uint16_t len, uint8_t if_type)
 			(unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
 			(unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
 			(unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
+/* Slave-reported TX buffer credits ran out after MAX_WRITE_BUF_RETRIES; the
+ * packet is dropped here silently otherwise. Rate-limited the same way as
+ * sdio_log_wifi_rx_copy_oom so a sustained credit-starvation period (as
+ * opposed to an isolated blip) is visible in the serial log without
+ * flooding it. */
+static void sdio_log_tx_buf_unavailable(uint32_t buf_needed, bool throttled)
+{
+	sdio_tx_buf_unavailable_count++;
+	if (sdio_tx_buf_unavailable_count > 5 && (sdio_tx_buf_unavailable_count % 100) != 0) {
+		return;
+	}
+	ESP_LOGW(TAG,
+			"no SDIO TX buffer credits from C6: buf_needed=%lu drops=%lu throttled=%d",
+			(unsigned long)buf_needed, (unsigned long)sdio_tx_buf_unavailable_count,
+			(int)throttled);
 }
 
 typedef struct {
@@ -780,7 +798,7 @@ static void sdio_write_task(void const* pvParameters)
 
 		ret = sdio_is_write_buffer_available(buf_needed);
 		if (ret != BUFFER_AVAILABLE) {
-			ESP_LOGV(TAG, "no SDIO write buffers on slave device");
+			sdio_log_tx_buf_unavailable(buf_needed, wifi_tx_throttling != 0);
 #if ESP_PKT_STATS
 			if (payload_header->if_type == ESP_STA_IF)
 				pkt_stats.sta_tx_out_drop++;
@@ -1297,11 +1315,15 @@ static void sdio_read_task(void const* pvParameters)
 		ESP_LOGV(TAG, "Intr: %08"PRIX32, interrupts);
 
 		/* Check all supported interrupts */
-		if (BIT(SDIO_INT_START_THROTTLE) & interrupts)
+		if (BIT(SDIO_INT_START_THROTTLE) & interrupts) {
 			wifi_tx_throttling = 1;
+			ESP_LOGW(TAG, "WiFi TX throttled by C6 (START_THROTTLE)");
+		}
 
-		if (BIT(SDIO_INT_STOP_THROTTLE) & interrupts)
+		if (BIT(SDIO_INT_STOP_THROTTLE) & interrupts) {
 			wifi_tx_throttling = 0;
+			ESP_LOGW(TAG, "WiFi TX throttle released by C6 (STOP_THROTTLE)");
+		}
 
 		if (!(BIT(SDIO_INT_NEW_PACKET) & interrupts)) {
 
