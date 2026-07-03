@@ -24,7 +24,21 @@ constexpr int kBaseRetryMs = 10000;
 constexpr int kMaxRetryMs = 120000;
 constexpr int kMaxSendStallSeconds = 8;
 
+// A caster that keeps rejecting us well past the normal ~80-85s backoff
+// plateau (2026-07-03: RTK2go connected-then-instantly-reset or flatly
+// refused the TCP connect for hours straight, ~400+ times overnight) is
+// most likely actively blocking/banning this IP, not experiencing a
+// transient blip. Retrying every ~80s for hours against that is pointless
+// load on both the caster and our own shared WiFi/SDIO link. Past this many
+// consecutive failures, fall back to a much longer, infrequent check-in.
+constexpr int kLongBackoffThreshold = 8;
+constexpr int kLongBackoffMs = 600000;        // 10 min
+constexpr int kLongBackoffJitterMs = 120000;  // + up to 2 min
+
 int retry_delay_ms(int failures) {
+    if (failures >= kLongBackoffThreshold) {
+        return kLongBackoffMs + static_cast<int>(esp_random() % kLongBackoffJitterMs);
+    }
     const int capped = std::clamp(failures, 1, 4);
     const int base = std::min(kBaseRetryMs << (capped - 1), kMaxRetryMs);
     const int jitter = static_cast<int>(esp_random() % 5000);
@@ -212,9 +226,16 @@ void NtripPushClient::run() {
             if (!connect_caster()) {
                 ++failures;
                 healthy_since_us = 0;
-                // After several consecutive failures invalidate the cached
-                // address so the next attempt forces a fresh DNS lookup.
-                if (failures >= 3) cached_addr_valid_ = false;
+                // Invalidate the cached address once per failure streak (not
+                // every retry) so the next attempt forces a fresh DNS lookup.
+                // getaddrinfo() holds a lwIP-wide mutex for up to ~2s, which
+                // stalls TLS handshakes on the HTTPS server -- re-resolving
+                // on every one of dozens of retries during a sustained
+                // rejection (2026-07-03: 59 straight RTK2go connect
+                // failures overnight) bought nothing (DNS resolved to the
+                // same stable IP every time) while repeatedly costing that
+                // shared lock.
+                if (failures == 3) cached_addr_valid_ = false;
                 vTaskDelay(pdMS_TO_TICKS(retry_delay_ms(failures)));
                 continue;
             }
