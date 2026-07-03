@@ -48,7 +48,13 @@ public:
 
 private:
     static constexpr size_t kMaxPacket = 1200;
-    static constexpr int kQueueDepth = 4;
+    // UM980 fires six 1Hz MSM messages (1077/1087/1097/1117/1127/1137) in a
+    // tight burst near the top of each second, plus 1005/1230 on their own
+    // slower cadences. A depth-4 queue can overflow on that burst alone --
+    // independent of any network stall -- since there's nowhere to put the
+    // 5th/6th message. 8 slots absorb a full burst with headroom without a
+    // meaningful memory cost (each slot is a small, fixed-size Packet).
+    static constexpr int kQueueDepth = 8;
 
     struct Packet {
         uint16_t length;
