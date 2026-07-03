@@ -7,12 +7,14 @@
 #include <fcntl.h>
 #include <vector>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "lwip/tcp.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "lwip/stats.h"
 #include "mbedtls/base64.h"
 
 namespace {
@@ -27,6 +29,31 @@ int retry_delay_ms(int failures) {
     const int base = std::min(kBaseRetryMs << (capped - 1), kMaxRetryMs);
     const int jitter = static_cast<int>(esp_random() % 5000);
     return std::min(base + jitter, kMaxRetryMs);
+}
+
+// A caster can accept a connection and flush a handful of packets before
+// stalling again -- clearing the backoff on any single successful send
+// still lets that pattern retry at max rate forever. Require a sustained
+// healthy streak before trusting the connection.
+constexpr int64_t kHealthyStreakUs = 5000000;  // 5s
+
+// Cumulative lwIP TCP-layer counters, logged alongside every reconnect. If
+// `memerr` climbs during a "socket write stalled" run, the stall is memory
+// pressure inside lwIP's own pbuf/PCB pools (distinct from the general heap
+// pressure already tracked via heap_caps) rather than genuine WAN loss; if
+// `drop`/`err` climb instead, that points to an actual protocol-level issue.
+// Cumulative since boot, so compare deltas between log lines, not absolutes.
+std::string lwip_tcp_stats_suffix() {
+#if LWIP_STATS
+    char buf[96];
+    snprintf(buf, sizeof(buf), " tcp{xmit=%u recv=%u drop=%u memerr=%u err=%u}",
+             (unsigned)lwip_stats.tcp.xmit, (unsigned)lwip_stats.tcp.recv,
+             (unsigned)lwip_stats.tcp.drop, (unsigned)lwip_stats.tcp.memerr,
+             (unsigned)lwip_stats.tcp.err);
+    return buf;
+#else
+    return "";
+#endif
 }
 
 }  // namespace
@@ -146,6 +173,7 @@ void NtripPushClient::task_entry(void *argument) {
 void NtripPushClient::run() {
     Packet packet{};
     int failures = 0;
+    int64_t healthy_since_us = 0;  // 0 = not currently in a healthy streak
     while (!stopping_) {
         bool enabled = false;
         {
@@ -157,6 +185,7 @@ void NtripPushClient::run() {
             if (queue_) xQueueReset(queue_);
             set_message(enabled ? "suspended" : "disabled", false);
             failures = 0;
+            healthy_since_us = 0;
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
@@ -164,6 +193,7 @@ void NtripPushClient::run() {
             close_socket();
             if (queue_) xQueueReset(queue_);
             failures = 0;
+            healthy_since_us = 0;
         }
         const int64_t resumed = resumed_us_.load();
         if (resumed > 0 && connect_stagger_ms_ > 0) {
@@ -181,6 +211,7 @@ void NtripPushClient::run() {
             set_message("connecting", false);
             if (!connect_caster()) {
                 ++failures;
+                healthy_since_us = 0;
                 // After several consecutive failures invalidate the cached
                 // address so the next attempt forces a fresh DNS lookup.
                 if (failures >= 3) cached_addr_valid_ = false;
@@ -199,10 +230,22 @@ void NtripPushClient::run() {
             std::string failure_reason;
             if (send_all(packet.data, packet.length, &failure_reason)) {
                 last_send_us_ = esp_timer_get_time();
-                failures = 0;
+                if (healthy_since_us == 0) healthy_since_us = last_send_us_;
+                // Only clear the backoff once sends have stayed healthy for
+                // a real stretch, not just one lucky packet — a caster can
+                // accept a connection and flush a handful of writes before
+                // stalling again, which would otherwise reset `failures`
+                // almost every cycle and defeat the backoff entirely (the
+                // 2026-07-02 RTK2go bans: every one showed partial data —
+                // "5kb", "3kb" — meaning some sends succeeded before the
+                // connection was marked bad).
+                if (last_send_us_ - healthy_since_us >= kHealthyStreakUs) {
+                    failures = 0;
+                }
             } else {
                 ++reconnects_;
                 ++failures;
+                healthy_since_us = 0;
                 set_error(
                     failure_reason.empty()
                         ? "write failed; reconnecting"
@@ -271,7 +314,10 @@ bool NtripPushClient::connect_caster() {
     set_message(
         protocol_ == NtripProtocol::kV2 ? "connected (v2)" : "connected (v1)",
         true);
-    ESP_LOGI(kTag, "%s connected", label_);
+    ESP_LOGI(kTag, "%s connected (heap free=%u largest=%u)%s", label_,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             lwip_tcp_stats_suffix().c_str());
     return true;
 }
 
@@ -429,7 +475,18 @@ void NtripPushClient::drain_headers() {
 void NtripPushClient::close_socket() {
     connected_ = false;
     if (socket_ >= 0) {
-        shutdown(socket_, SHUT_RDWR);
+        // We only ever get here after a caster stopped acking our writes (the
+        // "socket write stalled" path) or a handshake rejection -- the peer is
+        // by definition not responsive. A graceful shutdown()+close() tries to
+        // complete a FIN/ACK exchange with that same unresponsive peer before
+        // the kernel releases the PCB and its buffered-but-unacked send data;
+        // on 2026-07-02 that lingering state was confirmed to accumulate
+        // across repeated reconnects (heap fell in lockstep with each cycle,
+        // ~10-40KB per round across the 3 casters, no recovery). SO_LINGER
+        // with a 0s timeout forces an abortive close (RST, resources freed
+        // immediately) instead of waiting on a peer that isn't answering.
+        struct linger abortive{1, 0};
+        setsockopt(socket_, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive));
         close(socket_);
         socket_ = -1;
     }
@@ -446,7 +503,14 @@ void NtripPushClient::set_error(const std::string &error) {
     std::lock_guard lock(config_mutex_);
     last_error_ = error;
     message_ = error;
-    ESP_LOGW(kTag, "%s: %s", label_, error.c_str());
+    // Free/largest-block internal heap on every reconnect, to test whether
+    // reconnect churn itself correlates with heap pressure (2026-07-02: heap
+    // collapsed from ~206KB to single-digit KB over ~7 minutes during a
+    // reconnect burst, well before the eventual OOM abort in the web UI).
+    ESP_LOGW(kTag, "%s: %s (heap free=%u largest=%u)%s", label_, error.c_str(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             lwip_tcp_stats_suffix().c_str());
 }
 
 std::string NtripPushClient::base64(const std::string &input) {

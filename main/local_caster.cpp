@@ -14,6 +14,19 @@ namespace {
 
 constexpr char kTag[] = "local_caster";
 
+// A client reaching this path either failed a send (send_all() gave up on it)
+// or is being torn down while possibly mid-transfer -- the peer isn't known
+// to be responsive. A graceful shutdown()+close() wait to complete a FIN/ACK
+// exchange before releasing the PCB and its buffered-but-unacked data; on
+// ntrip_push's identical pattern (2026-07-02) that lingering state was
+// confirmed to leak heap across repeated reconnects. SO_LINGER with a 0s
+// timeout forces an abortive close (RST, resources freed immediately).
+void close_client_socket(int fd) {
+    struct linger abortive{1, 0};
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive));
+    close(fd);
+}
+
 uint32_t peer_ipv4(const sockaddr_storage &source) {
     if (source.ss_family != AF_INET) return 0;
     const auto *addr = reinterpret_cast<const sockaddr_in *>(&source);
@@ -205,8 +218,7 @@ void LocalCaster::broadcast(const Packet &packet) {
     for (int i = 0; i < kMaxClients; ++i) {
         int &client = clients_[i];
         if (client >= 0 && !send_all(client, packet.data, packet.length)) {
-            shutdown(client, SHUT_RDWR);
-            close(client);
+            close_client_socket(client);
             client = -1;
             client_ipv4_[i].store(0, std::memory_order_relaxed);
         }
@@ -218,8 +230,7 @@ void LocalCaster::close_clients() {
     for (int i = 0; i < kMaxClients; ++i) {
         int &client = clients_[i];
         if (client >= 0) {
-            shutdown(client, SHUT_RDWR);
-            close(client);
+            close_client_socket(client);
             client = -1;
         }
         client_ipv4_[i].store(0, std::memory_order_relaxed);

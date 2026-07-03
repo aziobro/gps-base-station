@@ -455,26 +455,47 @@ void BaseStation::reset_rtcm_parser() {
 
 void BaseStation::reset_rtcm_batch() {
     local_batch_.length = 0;
+    local_batch_.frame_count = 0;
     local_batch_.next_flush_us = 0;
     rtk2go_batch_.length = 0;
+    rtk2go_batch_.frame_count = 0;
     rtk2go_batch_.next_flush_us = 0;
     onocoy_batch_.length = 0;
+    onocoy_batch_.frame_count = 0;
     onocoy_batch_.next_flush_us = 0;
     rtkdata_batch_.length = 0;
+    rtkdata_batch_.frame_count = 0;
     rtkdata_batch_.next_flush_us = 0;
+}
+
+void BaseStation::flush_batch_frames(
+    RtcmBatch &batch,
+    const std::function<void(const uint8_t *, size_t)> &flush) {
+    size_t start = 0;
+    for (size_t i = 0; i < batch.frame_count; ++i) {
+        const size_t end = batch.frame_ends[i];
+        flush(batch.data.data() + start, end - start);
+        start = end;
+    }
+    batch.length = 0;
+    batch.frame_count = 0;
 }
 
 void BaseStation::publish_to_batch(
     RtcmBatch &batch, const uint8_t *data, size_t length, int64_t now,
     int64_t phase_offset_us,
     const std::function<void(const uint8_t *, size_t)> &flush) {
-    if (batch.length > 0 && batch.length + length > batch.data.size()) {
-        flush(batch.data.data(), batch.length);
-        batch.length = 0;
+    const bool bytes_full =
+        batch.length > 0 && batch.length + length > batch.data.size();
+    const bool frames_full =
+        batch.frame_count >= batch.frame_ends.size();
+    if (bytes_full || frames_full) {
+        flush_batch_frames(batch, flush);
         batch.next_flush_us = now + kRtcmBatchUs;
     }
     memcpy(batch.data.data() + batch.length, data, length);
     batch.length += length;
+    batch.frame_ends[batch.frame_count++] = batch.length;
     if (batch.next_flush_us == 0) {
         // First batch for this destination: arm its recurring schedule
         // offset by phase_offset_us so it doesn't land on the same instant
@@ -483,9 +504,8 @@ void BaseStation::publish_to_batch(
         // this initial stagger indefinitely.
         batch.next_flush_us = now + phase_offset_us + kRtcmBatchUs;
     }
-    if (batch.length >= batch.data.size() || now >= batch.next_flush_us) {
-        flush(batch.data.data(), batch.length);
-        batch.length = 0;
+    if (now >= batch.next_flush_us) {
+        flush_batch_frames(batch, flush);
         batch.next_flush_us = now + kRtcmBatchUs;
     }
 }
@@ -495,8 +515,7 @@ void BaseStation::flush_due_batch(
     const std::function<void(const uint8_t *, size_t)> &flush) {
     if (batch.length > 0 && batch.next_flush_us != 0 &&
         now >= batch.next_flush_us) {
-        flush(batch.data.data(), batch.length);
-        batch.length = 0;
+        flush_batch_frames(batch, flush);
         batch.next_flush_us = now + kRtcmBatchUs;
     }
 }

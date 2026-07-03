@@ -110,10 +110,22 @@ private:
     // phase-offset from the others (kRtcmStaggerUs in base_station.cpp) so
     // the local caster and three NTRIP casters don't all attempt to send
     // over the shared WiFi/SDIO link in the same instant every cycle.
+    //
+    // Frame boundaries within the batch are tracked (frame_ends) so a flush
+    // sends each complete RTCM frame as its own write instead of one
+    // concatenated blob. TCP send() can return a partial byte count; if a
+    // stall or failure hits partway through a multi-frame blob, whatever was
+    // already handed to the kernel is already committed to the stream while
+    // the rest never goes out, leaving a torn frame on the wire. Flushing
+    // frame-by-frame means a partial failure can only ever lose one whole
+    // frame, never split one.
     struct RtcmBatch {
+        static constexpr size_t kMaxFramesPerBatch = 12;
         std::array<uint8_t, kMaxRtcmFrame> data{};
         size_t length = 0;
         int64_t next_flush_us = 0;  // 0 = not yet armed
+        std::array<size_t, kMaxFramesPerBatch> frame_ends{};  // cumulative
+        size_t frame_count = 0;
     };
     RtcmBatch local_batch_;
     RtcmBatch rtk2go_batch_;
@@ -141,6 +153,9 @@ private:
                            const std::function<void(const uint8_t *, size_t)> &flush);
     void flush_due_batch(RtcmBatch &batch, int64_t now,
                           const std::function<void(const uint8_t *, size_t)> &flush);
+    static void flush_batch_frames(
+        RtcmBatch &batch,
+        const std::function<void(const uint8_t *, size_t)> &flush);
     void publish_rtcm_frame(const uint8_t *data, size_t length);
     static uint32_t rtcm_crc24q(const uint8_t *data, size_t length);
 };

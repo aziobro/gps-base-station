@@ -56,6 +56,20 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_LWIP_MAX_SOCKETS=32
+# Needed for NtripPushClient::close_socket()'s abortive SO_LINGER close: without
+# it, closing an NTRIP socket whose peer stopped acking (the "socket write
+# stalled" case) leaves the PCB + unacked send buffer lingering instead of
+# releasing immediately. Confirmed 2026-07-02: heap fell in lockstep with each
+# reconnect cycle across the 3 casters (~10-40KB per round, no recovery),
+# collapsing from 200KB to single-digit KB in under 4 minutes.
+CONFIG_LWIP_SO_LINGER=y
+# TCP-layer xmit/recv/drop/memerr/err counters, logged alongside every NTRIP
+# reconnect (ntrip_push.cpp) to distinguish genuine WAN-level packet loss from
+# memory pressure inside lwIP's own pbuf/PCB pools, since the root cause of
+# the repeated "socket write stalled" failures behind 4 RTK2go bans on
+# 2026-07-02 is still not fully explained -- local SDIO/WiFi stats stayed
+# clean throughout every incident.
+CONFIG_LWIP_STATS=y
 # Larger TCP window so the high-RTT SoftAP path (single-radio APSTA time-shares
 # with the station, AP clients power-save between beacons) isn't throttled by a
 # tiny window. Default 5760 (4xMSS) starves AP throughput; 11520 = 8xMSS.

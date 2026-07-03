@@ -47,9 +47,17 @@ constexpr int64_t kRinexProgressLogIntervalUs = 10LL * 1000000LL;
 constexpr int64_t kRinexSlowSendLogUs = 2LL * 1000000LL;
 constexpr int kPostExportStatusQuietMs = 120000;
 constexpr size_t kPostExportQuietBytes = kRinexExportLargeBytes;
-constexpr size_t kPageChunkBytes = 1024;
+// A full admin page (CSS + nav bar + dashboard content, ~11-12KB) previously
+// needed ~12 separate httpd_resp_send_chunk() calls at 1KB each, each one
+// independently exposed to a 2s send timeout -- on a channel now confirmed
+// (2026-07-02) to see multi-second contention windows roughly every 20s from
+// NTRIP reconnect churn, that's 12 rolls of the dice per page load. Larger
+// chunks + a longer per-chunk timeout give each write more room to ride out
+// a brief stall instead of failing fast on one that would have gone through
+// a couple seconds later.
+constexpr size_t kPageChunkBytes = 4096;
 constexpr int kPageChunkDelayMs = 3;
-constexpr int kWebSendTimeoutSec = 2;
+constexpr int kWebSendTimeoutSec = 6;
 constexpr int kRinexExportSendTimeoutSec = 12;
 constexpr int64_t kWebSlowSendLogUs = 2LL * 1000000LL;
 
@@ -2111,7 +2119,15 @@ std::string AdminWebServer::nav_html(const char *active_route) {
          "<path d='M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2'/></svg>"},
     };
     const std::string active = active_route ? active_route : "/";
-    std::string out =
+    std::string out;
+    // Reserve up front instead of letting the appends below grow the buffer
+    // geometrically (several reallocations, each briefly holding old+new
+    // buffers live) -- this string is built on every authenticated page
+    // load, and this path is where a heap-exhaustion abort was observed
+    // (2026-07-02). One allocation sized to the known ~5.4KB content is
+    // cheaper and less fragmentation-prone than 3-4 doubling reallocations.
+    out.reserve(6144);
+    out +=
         "<div class='bar'><h1>GPS Base Station</h1>"
         "<span class='spacer'></span>"
         "<span id='navpill' class='pill idle'><span class='dot'></span>"
