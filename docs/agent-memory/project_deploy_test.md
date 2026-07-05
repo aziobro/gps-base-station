@@ -21,17 +21,18 @@ Use when the device is crash-looping or otherwise not serving the web UI (OTA ne
 - **Pi:** `192.168.8.101`, user `aziobro` (SSH password is the user's — NOT stored in the repo). Device serial = `/dev/ttyACM0` (ESP32-P4 **native USB-Serial/JTAG** — it RE-ENUMERATES on every reset, which kills any plain `cat` reading it).
 - **Tools on Windows:** PuTTY `plink`/`pscp` in `C:\Program Files\PuTTY`. PowerShell 5.1 mangles embedded quotes when calling native exes, so run remote scripts with **`plink -m <localscriptfile>`**, not inline quoted commands.
 - **esptool on the Pi:** v5.x in `~/esptool-venv` (`python3 -m venv ~/esptool-venv && ~/esptool-venv/bin/pip install esptool`). Debian's packaged esptool is too old for esp32p4.
+- **Serial capture is systemd-managed** (`esp32-log.service`, added 2026-07-05): auto-starts on Pi boot, `Restart=always` if the capture process dies. This means the old `pkill -f 'cat /dev/ttyACM0'` trick to free the port **no longer works** — systemd sees the process die and respawns it within ~2s, racing esptool for the port. Use `systemctl stop`/`start` instead (an explicit stop is honored, not fought by `Restart=always`).
 
 Steps:
 1. Build locally (`.\idf.ps1 build`). Copy images to the Pi:
    `pscp -scp -pw <pw> build\bootloader\bootloader.bin build\partition_table\partition-table.bin build\ota_data_initial.bin build\gps_base_station.bin aziobro@192.168.8.101:/home/aziobro/fw/`
-2. Stop the serial capture to free the port: `pkill -f 'cat /dev/ttyACM0'` (this also tends to drop the plink session — just reconnect; confirm `fuser /dev/ttyACM0` is blank).
+2. Stop the serial capture to free the port: `sudo systemctl stop esp32-log.service` (confirm `sudo fuser /dev/ttyACM0` is blank).
 3. Flash app0 + reset otadata so the bootloader picks app0 (minimal, low-risk; leaves bootloader/partition table untouched):
    `~/esptool-venv/bin/esptool --chip esp32p4 --port /dev/ttyACM0 -b 460800 --before default-reset --after hard-reset write-flash 0xe000 ~/fw/ota_data_initial.bin 0x10000 ~/fw/gps_base_station.bin`
    (Partition map: bootloader 0x2000, partition-table 0x8000, otadata 0xe000, app0 0x10000, app1 0x610000, coredump 0xc10000.)
-4. Restart the serial capture as a **self-healing loop** (the old plain `cat | tee` died on every reboot):
-   `setsid bash -c 'while true; do cat /dev/ttyACM0 >> ~/logs/esp32p4-DATE.log 2>/dev/null; sleep 1; done' </dev/null >/dev/null 2>&1 &`
-   (NOTE: this variant drops the wall-clock `[date time]` prefix the original capture had; add a `ts` filter if that prefix is wanted.)
+4. Restart the serial capture: `sudo systemctl start esp32-log.service` (new timestamped log file each start; `~/logs/esp32p4-current.log` symlink always points at the live one).
+
+Or use `~/flash-esp32.sh ~/fw/ota_data_initial.bin ~/fw/gps_base_station.bin` on the Pi, which wraps steps 2-4 (stop → flash → restart, restarts the logger even if the flash fails).
 
 ## C. Verify a deploy landed + is stable
 - **Authoritative:** `curl -sk -u admin:$ADMIN_PW https://192.168.8.186/status` → check `"version"`, `"healthy":true`, and that `"uptime_sec"` climbs across calls (a reset = reboot/crash).

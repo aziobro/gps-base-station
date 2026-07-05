@@ -1,0 +1,16 @@
+[Unit]
+Description=ESP32-P4 serial log capture
+After=dev-ttyACM0.device local-fs.target
+Wants=dev-ttyACM0.device
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=aziobro
+WorkingDirectory=/home/aziobro
+ExecStart=/home/aziobro/start-pi-serial-log.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
