@@ -134,14 +134,40 @@ require_password() {
     [ -n "${ADMIN_PASSWORD:-}" ] || die "admin password required"
 }
 
+# /update and /status are gated by AdminWebServer::authorize()
+# (main/web_server.cpp), which only checks a session cookie set by
+# POST /login -- there is no HTTP Basic Auth fallback. A bare
+# `curl -u user:pass` silently fails auth on every request (hit this
+# 2026-07-05: "Login required" on every call despite a correct password).
+# Logs in fresh each time rather than sharing one cookie jar for the whole
+# script run: a successful OTA upload reboots the device, which wipes its
+# in-RAM session_token_, invalidating any cookie obtained before the reboot.
+login_cookie_jar() {
+    local host="$1"
+    local jar
+    jar="$(mktemp)"
+    local code
+    code="$(curl -k -s -m 8 -c "$jar" -o /dev/null -w '%{http_code}' \
+        --data-urlencode "user=$ADMIN_USER" \
+        --data-urlencode "password=$ADMIN_PASSWORD" \
+        "https://$host/login")"
+    if [ "$code" != "303" ]; then
+        rm -f "$jar"
+        return 1
+    fi
+    echo "$jar"
+}
+
 device_version() {
     # Prints the version field from /status, or nothing on failure.
     local host="$1"
-    curl -k -s -m 8 -u "$ADMIN_USER:$ADMIN_PASSWORD" \
-        "https://$host/status" 2>/dev/null \
+    local jar
+    jar="$(login_cookie_jar "$host")" || { echo ""; return; }
+    curl -k -s -m 8 -b "$jar" "https://$host/status" 2>/dev/null \
         | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("version",""))
 except Exception: pass'
+    rm -f "$jar"
 }
 
 verify_live() {
@@ -189,11 +215,14 @@ case "$MODE" in
         # device already took.
         for attempt in 1 2 3; do
             step "Uploading over the air to $OTA_HOST (attempt $attempt)"
+            JAR="$(login_cookie_jar "$OTA_HOST")" \
+                || die "login to $OTA_HOST failed — check ADMIN_PASSWORD"
             RESPONSE="$(curl -k -s -m 600 \
-                -u "$ADMIN_USER:$ADMIN_PASSWORD" \
+                -b "$JAR" \
                 -H 'Content-Type: application/octet-stream' \
                 --data-binary "@$APP_BIN" \
                 "https://$OTA_HOST/update" || true)"
+            rm -f "$JAR"
             if printf '%s' "$RESPONSE" | grep -q "Update accepted"; then
                 echo "    device: $RESPONSE"
                 break

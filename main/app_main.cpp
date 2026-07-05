@@ -8,6 +8,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "log_buffer.hpp"
+#include "net_health.hpp"
 #include "nvs_flash.h"
 #include "sd_delete.hpp"
 #include "sd_manager.hpp"
@@ -208,8 +209,12 @@ extern "C" void app_main() {
         ESP_LOGW(kTag, "Display init failed — touchscreen unavailable");
     }
 
+    static NetHealth net_health;
+    ESP_ERROR_CHECK(net_health.start());
+
     static AdminWebServer web_server;
-    ESP_ERROR_CHECK(web_server.start(storage, wifi_manager, base_station, sd_manager));
+    ESP_ERROR_CHECK(
+        web_server.start(storage, wifi_manager, base_station, sd_manager, net_health));
     ESP_LOGI(kTag, "Administration server ready; RTK services held briefly");
 
     ESP_ERROR_CHECK(

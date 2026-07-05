@@ -475,11 +475,12 @@ std::string json_string_literal(const char *text) {
 
 esp_err_t AdminWebServer::start(
     Storage &storage, WifiManager &wifi,
-    BaseStation &station, SdManager &sd) {
+    BaseStation &station, SdManager &sd, NetHealth &net_health) {
     storage_ = &storage;
     wifi_ = &wifi;
     station_ = &station;
     sd_ = &sd;
+    net_health_ = &net_health;
 
     httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
     // Raised from 32: the secure handler table grew past 30 with the bulk-delete
@@ -1382,6 +1383,7 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const size_t spiram_largest_free =
         heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const NetHealth::Status net = server->net_health_->status();
     const SurveySnapshot &sv = station.survey;
     const char *survey_state =
         sv.state == SurveyState::kCollecting ? "collecting" :
@@ -1401,6 +1403,9 @@ esp_err_t AdminWebServer::status_handler(httpd_req_t *request) {
         "\",\"healthy\":" + (server->station_->healthy() ? "true" : "false") +
         ",\"uptime_sec\":" + std::to_string(esp_timer_get_time() / 1000000ULL) +
         ",\"reset_reason\":\"" + json_escape(reset_reason_str(esp_reset_reason())) + "\"" +
+        ",\"internet_up\":" + (net.up ? "true" : "false") +
+        ",\"internet_since_change_sec\":" + std::to_string(net.since_change_sec) +
+        ",\"internet_checked_sec_ago\":" + std::to_string(net.checked_sec_ago) +
         ",\"wifi_connected\":" + (server->wifi_->connected() ? "true" : "false") +
         ",\"ap_active\":" + (server->wifi_->access_point_active() ? "true" : "false") +
         ",\"ssid\":\"" + json_escape(server->wifi_->ssid()) +

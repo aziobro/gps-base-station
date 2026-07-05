@@ -110,8 +110,27 @@ if ($BinVersion -ne $Target) { Die "binary version '$BinVersion' != target '$Tar
 Write-Host "    OK - binary matches target version"
 
 # --- helpers for live (on-device) verification ---
+# /update and /status are gated by AdminWebServer::authorize()
+# (main/web_server.cpp), which only checks a session cookie set by
+# POST /login -- there is no HTTP Basic Auth fallback. A bare
+# `curl -u user:pass` silently fails auth on every request (hit this
+# 2026-07-05: "Login required" on every call despite a correct password).
+# Logs in fresh each time rather than reusing one cookie jar for the whole
+# script run: a successful OTA upload reboots the device, which wipes its
+# in-RAM session_token_, invalidating any cookie obtained before the reboot.
+function New-LoginCookieJar([string]$h) {
+    $jar = New-TemporaryFile
+    $code = & curl.exe -k -s -m 8 -c $jar -o NUL -w '%{http_code}' `
+        --data-urlencode "user=$AdminUser" --data-urlencode "password=$AdminPassword" `
+        "https://$h/login"
+    if ($code -ne '303') { Remove-Item $jar -ErrorAction SilentlyContinue; return $null }
+    return $jar
+}
 function Get-DeviceVersion([string]$h) {
-    $r = & curl.exe -k -s -m 8 -u "${AdminUser}:${AdminPassword}" "https://$h/status"
+    $jar = New-LoginCookieJar $h
+    if (-not $jar) { return '' }
+    $r = & curl.exe -k -s -m 8 -b $jar "https://$h/status"
+    Remove-Item $jar -ErrorAction SilentlyContinue
     if (-not $r) { return '' }
     try { return ($r | ConvertFrom-Json).version } catch { return '' }
 }
@@ -151,9 +170,12 @@ switch ($Mode) {
         # but check /status first so we never re-upload a build the device already took.
         for ($attempt = 1; $attempt -le 3; $attempt++) {
             Step "Uploading over the air to $OtaHost (attempt $attempt)"
-            $resp = & curl.exe -k -s -m 600 -u "${AdminUser}:${AdminPassword}" `
+            $jar = New-LoginCookieJar $OtaHost
+            if (-not $jar) { Die "login to $OtaHost failed - check ADMIN_PASSWORD" }
+            $resp = & curl.exe -k -s -m 600 -b $jar `
                 -H "Content-Type: application/octet-stream" `
                 --data-binary "@$AppBin" "https://$OtaHost/update"
+            Remove-Item $jar -ErrorAction SilentlyContinue
             if ($resp -match 'Update accepted') { Write-Host "    device: $resp"; break }
             Write-Host "    upload did not confirm (response: '$resp')"
             Start-Sleep -Seconds 6

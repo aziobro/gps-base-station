@@ -35,17 +35,20 @@ ADMIN_PASSWORD=<admin-pw> tools/release.sh ota <device-ip> [VERSION]   # bump+bu
 `tools/fw_version.py <bin>` extracts the embedded version (scans for esp_app_desc_t magic).
 
 ## Manual OTA (when not using release.sh)
+`/update` and `/status` are gated by `AdminWebServer::authorize()` (main/web_server.cpp), which only checks a session cookie set by `POST /login` — there is **no HTTP Basic Auth fallback**. A bare `curl -u user:pass` silently fails auth on every call (looks like "Login required" even with the correct password — hit this 2026-07-05). Log in first and reuse the cookie jar:
 ```bash
-curl -k -m 300 -u admin:<admin-pw> \
+curl -k -s -c /tmp/jar --data-urlencode "user=admin" --data-urlencode "password=<admin-pw>" \
+  https://<device-ip>/login
+curl -k -m 300 -b /tmp/jar \
   -H "Content-Type: application/octet-stream" \
   --data-binary @build/gps_base_station.bin \
   https://<device-ip>/update
 ```
-Must be raw `application/octet-stream` (NOT `curl -F` multipart → ESP_ERR_OTA_VALIDATE_FAILED). Failed OTA auto-rolls back after a 30 s health check.
+Must be raw `application/octet-stream` (NOT `curl -F` multipart → ESP_ERR_OTA_VALIDATE_FAILED). Failed OTA auto-rolls back after a 30 s health check. A successful upload reboots the device, which wipes its in-RAM session token — get a fresh cookie (re-run the `/login` step) before any post-reboot `/status` check.
 
 ## Device / credentials
 - Device IP: `192.168.8.186` (DHCP — may change; `gps-base.local` mDNS also works).
-- Admin user `admin`, password `<admin-pw>`. Web UI is Basic Auth on all pages.
+- Admin user `admin`, password `<admin-pw>`. Web UI is session-cookie auth (via `/login`), not HTTP Basic Auth.
 
 ## Recovery firmware (bootstrap)
 - `bootstrap/` = minimal ~920 KB firmware: WiFi + HTTPS `/update` only. Breaks the OTA catch-22 (main app won't boot / won't fit).

@@ -5,6 +5,7 @@ idf_component_register(
         "display.cpp"
         "local_caster.cpp"
         "log_buffer.cpp"
+        "net_health.cpp"
         "ntrip_push.cpp"
         "rinex_logger.cpp"
         "sd_delete.cpp"

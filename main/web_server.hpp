@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include "net_health.hpp"
 #include "sd_manager.hpp"
 #include "storage.hpp"
 #include "ui_sections.hpp"
@@ -18,7 +19,7 @@ class AdminWebServer {
 public:
     esp_err_t start(
         Storage &storage, WifiManager &wifi,
-        BaseStation &station, SdManager &sd);
+        BaseStation &station, SdManager &sd, NetHealth &net_health);
     void stop();
 
 private:
@@ -26,6 +27,7 @@ private:
     WifiManager *wifi_ = nullptr;
     BaseStation *station_ = nullptr;
     SdManager *sd_ = nullptr;
+    NetHealth *net_health_ = nullptr;
     httpd_handle_t https_server_ = nullptr;
     httpd_handle_t http_server_ = nullptr;
     std::string session_token_;
