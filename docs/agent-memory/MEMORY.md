@@ -10,7 +10,7 @@
 - [project_deploy_test](project_deploy_test.md) — deploy + verify runbook: OTA via web, USB recovery flash from the monitoring Pi (esptool over /dev/ttyACM0), how to confirm a build landed + is crash-free
 
 ## Networking & Web
-- [project_ntrip](project_ntrip.md) — NTRIP push flow, reconnect-storm root cause + fix, diagnostics
+- [project_ntrip](project_ntrip.md) — correction-slot mailbox architecture, reconnect/backoff logic, net_health, Onocoy-vs-RTK2go/RTKdata behavior, bug history
 
 ## RINEX / Post-processing
 - [project_rinex](project_rinex.md) — signal→band classification, Unicore UM980 signal codes, antenna metadata, OPUS/CSRS-PPP

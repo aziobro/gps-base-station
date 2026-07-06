@@ -253,6 +253,14 @@ void BaseStation::run() {
                 static_cast<uint64_t>(rate_bytes) * 1000000ULL / elapsed);
             rate_bytes = 0;
             rate_started = now;
+            // Latch outbound-ready on the rising edge only, so a later dip
+            // below the threshold (e.g. a brief satellite dropout) doesn't
+            // re-suspend already-connected casters -- this is a one-time
+            // readiness gate for connecting, not a continuous requirement.
+            if (rtcm_bps_ >= config::kMinOutboundRtcmBps &&
+                !outbound_rate_ready_.exchange(true)) {
+                apply_stream_state();
+            }
         }
         vTaskDelay(1);
     }
@@ -285,13 +293,14 @@ void BaseStation::handle_action(const Action &action) {
 void BaseStation::enter_survey(bool clear_position) {
     mode_ = BaseMode::kSurvey;
     has_rtcm_data_ = false;
+    outbound_rate_ready_ = false;
     apply_stream_state();
     if (clear_position) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(storage_.clear_position());
     }
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
-    reset_rtcm_batch();
+    reset_rtcm_state();
     survey_.start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_survey_output());
     ESP_LOGI(kTag, "Survey mode; all RTCM streams suspended");
@@ -300,10 +309,11 @@ void BaseStation::enter_survey(bool clear_position) {
 void BaseStation::enter_transmit(double lat, double lon, double height) {
     mode_ = BaseMode::kTransmit;
     has_rtcm_data_ = false;
+    outbound_rate_ready_ = false;
     survey_.reset();
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
-    reset_rtcm_batch();
+    reset_rtcm_state();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_base(lat, lon, height));
     apply_stream_state();
     ESP_LOGI(kTag, "Base transmission mode");
@@ -319,7 +329,7 @@ void BaseStation::enter_raw_collection() {
     apply_stream_state();  // suspend all NTRIP/local streams
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
-    reset_rtcm_batch();
+    reset_rtcm_state();
     ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_raw_output());
     const BasePosition pos = storage_.load_position();
     rinex_logger_.start(pos.lat, pos.lon, pos.height,
@@ -333,12 +343,15 @@ void BaseStation::exit_raw_collection() {
     rinex_logger_.stop();
     raw_collection_ = false;
     uart_flush_input(data_uart_);
-    // Restore RTCM output; has_rtcm_data_ is reset so streams stay suspended
-    // until the first RTCM batch arrives (prevents empty connections to RTK2go).
+    // Restore RTCM output; has_rtcm_data_/outbound_rate_ready_ are reset so
+    // streams stay suspended until the first RTCM frame arrives and the
+    // outbound casters additionally wait for a sustained rate (prevents empty
+    // or premature connections to RTK2go -- see kMinOutboundRtcmBps).
     const BasePosition pos = storage_.load_position();
     has_rtcm_data_ = false;
+    outbound_rate_ready_ = false;
     reset_rtcm_parser();
-    reset_rtcm_batch();
+    reset_rtcm_state();
     ESP_ERROR_CHECK_WITHOUT_ABORT(
         receiver_.configure_base(pos.lat, pos.lon, pos.height));
     apply_stream_state();
@@ -351,7 +364,8 @@ bool BaseStation::effective_streams_suspended() const {
 }
 
 bool BaseStation::effective_outbound_streams_suspended() const {
-    return effective_streams_suspended() || !network_available_;
+    return effective_streams_suspended() || !network_available_ ||
+        !outbound_rate_ready_;
 }
 
 void BaseStation::apply_stream_state() {
@@ -394,12 +408,7 @@ void BaseStation::read_data_uart() {
     const int64_t now = esp_timer_get_time();
     flush_due_batch(local_batch_, now,
                      [this](const uint8_t *d, size_t n) { local_caster_.push(d, n); });
-    flush_due_batch(rtk2go_batch_, now,
-                     [this](const uint8_t *d, size_t n) { rtk2go_.push(d, n); });
-    flush_due_batch(onocoy_batch_, now,
-                     [this](const uint8_t *d, size_t n) { onocoy_.push(d, n); });
-    flush_due_batch(rtkdata_batch_, now,
-                     [this](const uint8_t *d, size_t n) { rtkdata_.push(d, n); });
+    flush_due_corrections(now);
 }
 
 void BaseStation::feed_rtcm_byte(uint8_t byte) {
@@ -453,19 +462,15 @@ void BaseStation::reset_rtcm_parser() {
     rtcm_frame_expected_ = 0;
 }
 
-void BaseStation::reset_rtcm_batch() {
+void BaseStation::reset_rtcm_state() {
     local_batch_.length = 0;
     local_batch_.frame_count = 0;
     local_batch_.next_flush_us = 0;
-    rtk2go_batch_.length = 0;
-    rtk2go_batch_.frame_count = 0;
-    rtk2go_batch_.next_flush_us = 0;
-    onocoy_batch_.length = 0;
-    onocoy_batch_.frame_count = 0;
-    onocoy_batch_.next_flush_us = 0;
-    rtkdata_batch_.length = 0;
-    rtkdata_batch_.frame_count = 0;
-    rtkdata_batch_.next_flush_us = 0;
+    for (auto &slot : correction_slots_) slot = CorrectionSlot{};
+    const int64_t now = esp_timer_get_time();
+    push_next_flush_us_[kPushRtk2go] = now + kRtcmStaggerUs + kRtcmBatchUs;
+    push_next_flush_us_[kPushOnocoy] = now + kRtcmStaggerUs * 2 + kRtcmBatchUs;
+    push_next_flush_us_[kPushRtkdata] = now + kRtcmStaggerUs * 3 + kRtcmBatchUs;
 }
 
 void BaseStation::flush_batch_frames(
@@ -520,6 +525,72 @@ void BaseStation::flush_due_batch(
     }
 }
 
+uint16_t BaseStation::rtcm_message_number(const uint8_t *data, size_t length) {
+    // RTCM3 payload starts right after the 3-byte header (preamble + 2-byte
+    // length field); message number is the payload's first 12 bits.
+    if (length < 5) return 0;
+    return (static_cast<uint16_t>(data[3]) << 4) | (data[4] >> 4);
+}
+
+void BaseStation::publish_to_corrections(
+    const uint8_t *data, size_t length, uint16_t message_number, int64_t now) {
+    CorrectionSlot *slot = nullptr;
+    for (auto &candidate : correction_slots_) {
+        if (candidate.used && candidate.message_number == message_number) {
+            slot = &candidate;
+            break;
+        }
+    }
+    if (!slot) {
+        for (auto &candidate : correction_slots_) {
+            if (!candidate.used) {
+                slot = &candidate;
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        ESP_LOGW(kTag, "No free correction slot for RTCM message %u -- dropped",
+                 static_cast<unsigned>(message_number));
+        return;
+    }
+    slot->used = true;
+    slot->message_number = message_number;
+    memcpy(slot->data.data(), data, length);
+    slot->length = length;
+    slot->sent_mask = 0;  // a fresh version supersedes whatever was pending
+    slot->updated_us = now;
+}
+
+void BaseStation::flush_destination_if_due(
+    PushDestination dest, int64_t now,
+    const std::function<bool(const uint8_t *, size_t)> &flush) {
+    if (now < push_next_flush_us_[dest]) return;
+    const uint8_t bit = static_cast<uint8_t>(1u << dest);
+    for (auto &slot : correction_slots_) {
+        if (!slot.used || slot.length == 0 || (slot.sent_mask & bit)) continue;
+        if (flush(slot.data.data(), slot.length)) {
+            slot.sent_mask |= bit;
+        }
+        // else: destination wasn't actually able to take it (disconnected/
+        // suspended) -- leave the bit clear so this slot's current data is
+        // retried on the next tick instead of being silently written off.
+    }
+    push_next_flush_us_[dest] = now + kRtcmBatchUs;
+}
+
+void BaseStation::flush_due_corrections(int64_t now) {
+    flush_destination_if_due(
+        kPushRtk2go, now,
+        [this](const uint8_t *d, size_t n) { return rtk2go_.push(d, n); });
+    flush_destination_if_due(
+        kPushOnocoy, now,
+        [this](const uint8_t *d, size_t n) { return onocoy_.push(d, n); });
+    flush_destination_if_due(
+        kPushRtkdata, now,
+        [this](const uint8_t *d, size_t n) { return rtkdata_.push(d, n); });
+}
+
 void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
     if (!data || length == 0) return;
     if (length > kMaxRtcmFrame) {
@@ -534,12 +605,7 @@ void BaseStation::publish_rtcm_frame(const uint8_t *data, size_t length) {
     const int64_t now = esp_timer_get_time();
     publish_to_batch(local_batch_, data, length, now, 0,
                       [this](const uint8_t *d, size_t n) { local_caster_.push(d, n); });
-    publish_to_batch(rtk2go_batch_, data, length, now, kRtcmStaggerUs,
-                      [this](const uint8_t *d, size_t n) { rtk2go_.push(d, n); });
-    publish_to_batch(onocoy_batch_, data, length, now, kRtcmStaggerUs * 2,
-                      [this](const uint8_t *d, size_t n) { onocoy_.push(d, n); });
-    publish_to_batch(rtkdata_batch_, data, length, now, kRtcmStaggerUs * 3,
-                      [this](const uint8_t *d, size_t n) { rtkdata_.push(d, n); });
+    publish_to_corrections(data, length, rtcm_message_number(data, length), now);
     rtcm_total_ += length;
 }
 

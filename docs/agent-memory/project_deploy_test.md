@@ -18,14 +18,14 @@ $env:ADMIN_PASSWORD='$ADMIN_PW'; .\tools\release.ps1 ota 192.168.8.186
 ## B. USB recovery flash from the Pi (when OTA can't be used)
 Use when the device is crash-looping or otherwise not serving the web UI (OTA needs the web stack up). The monitoring Pi has the device on USB.
 
-- **Pi:** `192.168.8.101`, user `aziobro` (SSH password is the user's — NOT stored in the repo). Device serial = `/dev/ttyACM0` (ESP32-P4 **native USB-Serial/JTAG** — it RE-ENUMERATES on every reset, which kills any plain `cat` reading it).
+- **Pi:** `192.168.8.100`, user `aziobro` (SSH password is the user's — NOT stored in the repo). Device serial = `/dev/ttyACM0` (ESP32-P4 **native USB-Serial/JTAG** — it RE-ENUMERATES on every reset, which kills any plain `cat` reading it).
 - **Tools on Windows:** PuTTY `plink`/`pscp` in `C:\Program Files\PuTTY`. PowerShell 5.1 mangles embedded quotes when calling native exes, so run remote scripts with **`plink -m <localscriptfile>`**, not inline quoted commands.
 - **esptool on the Pi:** v5.x in `~/esptool-venv` (`python3 -m venv ~/esptool-venv && ~/esptool-venv/bin/pip install esptool`). Debian's packaged esptool is too old for esp32p4.
 - **Serial capture is systemd-managed** (`esp32-log.service`, added 2026-07-05): auto-starts on Pi boot, `Restart=always` if the capture process dies. This means the old `pkill -f 'cat /dev/ttyACM0'` trick to free the port **no longer works** — systemd sees the process die and respawns it within ~2s, racing esptool for the port. Use `systemctl stop`/`start` instead (an explicit stop is honored, not fought by `Restart=always`).
 
 Steps:
 1. Build locally (`.\idf.ps1 build`). Copy images to the Pi:
-   `pscp -scp -pw <pw> build\bootloader\bootloader.bin build\partition_table\partition-table.bin build\ota_data_initial.bin build\gps_base_station.bin aziobro@192.168.8.101:/home/aziobro/fw/`
+   `pscp -scp -pw <pw> build\bootloader\bootloader.bin build\partition_table\partition-table.bin build\ota_data_initial.bin build\gps_base_station.bin aziobro@192.168.8.100:/home/aziobro/fw/`
 2. Stop the serial capture to free the port: `sudo systemctl stop esp32-log.service` (confirm `sudo fuser /dev/ttyACM0` is blank).
 3. Flash app0 + reset otadata so the bootloader picks app0 (minimal, low-risk; leaves bootloader/partition table untouched):
    `~/esptool-venv/bin/esptool --chip esp32p4 --port /dev/ttyACM0 -b 460800 --before default-reset --after hard-reset write-flash 0xe000 ~/fw/ota_data_initial.bin 0x10000 ~/fw/gps_base_station.bin`

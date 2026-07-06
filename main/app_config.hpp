@@ -21,6 +21,17 @@ inline constexpr int kRtcmBeidouRateSec = 1;
 inline constexpr int kRtcmNavicRateSec = 1;
 inline constexpr int kRtcmGlonassBiasRateSec = 30;
 
+// Minimum sustained RTCM output (bytes/sec, one full measurement window --
+// see BaseStation::run()'s rtcm_bps_ calc) required before the outbound
+// NTRIP push destinations (RTK2go/Onocoy/RTKdata) are allowed to connect.
+// Added after a real RTK2go ban (2026-07-06): a fresh mode transition
+// (post-relocation survey -> transmit) unsuspended streams on the very
+// first published RTCM frame, but the receiver hadn't reached steady
+// output yet -- RTK2go accepted the handshake, got ~0kb for 25s, and
+// banned the IP for "not enough data soon enough after connecting."
+// Local caster is unaffected (LAN clients, no external abuse-prevention).
+inline constexpr uint32_t kMinOutboundRtcmBps = 900;
+
 inline constexpr uint16_t kLocalNtripPort = 2101;
 inline constexpr char kLocalMountpoint[] = "BASE0";
 

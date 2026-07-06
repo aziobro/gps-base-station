@@ -43,7 +43,10 @@ public:
         bool enabled, const std::string &mountpoint,
         const std::string &password);
     void set_suspended(bool suspended);
-    void push(const uint8_t *data, size_t length);
+    // Returns false (without queuing anything) if the client is disconnected,
+    // suspended, or not yet started -- the caller should treat that as "not
+    // delivered" rather than assume the data went out.
+    bool push(const uint8_t *data, size_t length);
     NtripStatus status() const;
 
 private:

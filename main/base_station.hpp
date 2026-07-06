@@ -96,6 +96,11 @@ private:
     std::atomic<bool> user_streams_enabled_{true};
     std::atomic<bool> network_available_{false};
     std::atomic<bool> has_rtcm_data_{false};
+    // Latched true once rtcm_bps_ has cleared config::kMinOutboundRtcmBps for
+    // a full measurement window since the last mode transition; gates outbound
+    // NTRIP connections separately from has_rtcm_data_ (which only requires
+    // one frame, not a sustained rate) -- see effective_outbound_streams_suspended().
+    std::atomic<bool> outbound_rate_ready_{false};
     std::atomic<bool> raw_collection_{false};
     std::atomic<BaseMode> mode_{BaseMode::kSurvey};
     std::atomic<uint32_t> rtcm_bps_{0};
@@ -128,9 +133,39 @@ private:
         size_t frame_count = 0;
     };
     RtcmBatch local_batch_;
-    RtcmBatch rtk2go_batch_;
-    RtcmBatch onocoy_batch_;
-    RtcmBatch rtkdata_batch_;
+
+    // Bit position in CorrectionSlot::sent_mask for each outbound NTRIP push
+    // destination. The local caster stays on RtcmBatch above -- LAN clients
+    // don't have the WAN stall/reconnect problem this solves for.
+    enum PushDestination : uint8_t {
+        kPushRtk2go = 0,
+        kPushOnocoy = 1,
+        kPushRtkdata = 2,
+    };
+
+    // Latest-value-wins mailbox for RTK2go/Onocoy/RTKdata: one slot per RTCM
+    // message *type* (1005, 1077, 1087, ...) holding only the most recent
+    // frame of that type, plus a per-destination "have I sent this version"
+    // bit. A new frame of the same type overwrites the slot and clears every
+    // destination's bit, so a destination that was disconnected or behind
+    // always sends the freshest data of every type once it catches up --
+    // including 1005/1230, which run on their own slower cadence than the
+    // 1Hz MSM burst and could otherwise sit stale for a while after a
+    // reconnect under a rolling time-window batch (the old per-destination
+    // RtcmBatch model this replaces for push destinations).
+    struct CorrectionSlot {
+        bool used = false;
+        uint16_t message_number = 0;
+        std::array<uint8_t, kMaxRtcmFrame> data{};
+        size_t length = 0;
+        uint8_t sent_mask = 0;
+        int64_t updated_us = 0;  // for future send-latency diagnostics
+    };
+    static constexpr size_t kMaxCorrectionSlots = 16;
+    std::array<CorrectionSlot, kMaxCorrectionSlots> correction_slots_;
+    // Indexed by PushDestination. Same phase-offset-then-kRtcmBatchUs-cadence
+    // scheme as RtcmBatch.next_flush_us, armed once in reset_rtcm_state().
+    std::array<int64_t, 3> push_next_flush_us_{};
 
     static void task_entry(void *argument);
     void run();
@@ -147,7 +182,7 @@ private:
     void read_data_uart_raw();
     void feed_rtcm_byte(uint8_t byte);
     void reset_rtcm_parser();
-    void reset_rtcm_batch();
+    void reset_rtcm_state();
     void publish_to_batch(RtcmBatch &batch, const uint8_t *data, size_t length,
                            int64_t now, int64_t phase_offset_us,
                            const std::function<void(const uint8_t *, size_t)> &flush);
@@ -156,6 +191,18 @@ private:
     static void flush_batch_frames(
         RtcmBatch &batch,
         const std::function<void(const uint8_t *, size_t)> &flush);
+    static uint16_t rtcm_message_number(const uint8_t *data, size_t length);
+    void publish_to_corrections(
+        const uint8_t *data, size_t length, uint16_t message_number, int64_t now);
+    void flush_due_corrections(int64_t now);
+    // flush returns whether the data was actually handed off (false if the
+    // destination was disconnected/suspended and silently dropped it) -- a
+    // slot is only marked sent to this destination on a true return, so
+    // data that never went out stays pending and is retried next tick
+    // instead of being skipped until the next unrelated update overwrites it.
+    void flush_destination_if_due(
+        PushDestination dest, int64_t now,
+        const std::function<bool(const uint8_t *, size_t)> &flush);
     void publish_rtcm_frame(const uint8_t *data, size_t length);
     static uint32_t rtcm_crc24q(const uint8_t *data, size_t length);
 };

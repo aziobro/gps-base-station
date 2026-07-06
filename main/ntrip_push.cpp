@@ -137,12 +137,12 @@ void NtripPushClient::set_suspended(bool suspended) {
     }
 }
 
-void NtripPushClient::push(const uint8_t *data, size_t length) {
-    if (!data || length == 0 || !queue_ || suspended_ || !connected_) return;
+bool NtripPushClient::push(const uint8_t *data, size_t length) {
+    if (!data || length == 0 || !queue_ || suspended_ || !connected_) return false;
     Packet packet{};
     packet.length = std::min(length, kMaxPacket);
     memcpy(packet.data, data, packet.length);
-    if (xQueueSend(queue_, &packet, 0) == pdTRUE) return;
+    if (xQueueSend(queue_, &packet, 0) == pdTRUE) return true;
     // Queue full: the sender is briefly behind (e.g. a stalled TCP window).
     // Drop the OLDEST batch and keep the freshest one rather than forcing a
     // reconnect — RTCM corrections are superseded every second, and tearing
@@ -152,6 +152,7 @@ void NtripPushClient::push(const uint8_t *data, size_t length) {
     xQueueReceive(queue_, &stale, 0);
     ++dropped_batches_;
     xQueueSend(queue_, &packet, 0);
+    return true;
 }
 
 NtripStatus NtripPushClient::status() const {

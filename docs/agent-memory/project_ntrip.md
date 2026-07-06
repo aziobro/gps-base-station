@@ -1,28 +1,49 @@
 ---
 name: project_ntrip
-description: NTRIP push architecture, the reconnect-storm bug, and diagnostics
+description: NTRIP push architecture (correction-slot mailbox), reconnect/backoff logic, net_health, and the hard-won bug history
 metadata:
   node_type: memory
   type: project
 ---
 
-NTRIP push client design and the hard-won root cause of "rejected"/drop errors. See [[project_structure]].
+NTRIP push client design, the correction-delivery data path, and every hard-won root cause behind "rejected"/drop/reconnect-storm behavior. See [[project_structure]], [[project_build_deploy]].
 
-## Data flow
-- `base_station.cpp` accumulates RTCM into a 1024 B batch, flushed every 200 ms or when full (`kRtcmBatchUs`), then `push()`es to each `NtripPushClient`.
-- Each client (`main/ntrip_push.cpp`) has a 12-deep FreeRTOS queue + worker task. Worker drains queue and `send()`s to the caster.
-- Clients: RTK2go (v1 SOURCE), Onocoy (v2 POST), RTKdata (v1). Hosts in `app_config.hpp`.
+## Data flow (current, as of ota137 / 2026-07-06)
+- **Local caster** (`local_caster_`, LAN broadcast on port 2101) still uses the original `RtcmBatch` model in `base_station.cpp`: a ~200ms rolling window (`kRtcmBatchUs`) coalesces whatever RTCM frames arrive, flushed **frame-by-frame** (never concatenated — a concatenated multi-frame `send()` can partially complete then stall/fail, tearing a frame on the wire; this bit us once, ota126).
+- **RTK2go/Onocoy/RTKdata** (the 3 outbound push destinations) use a **`CorrectionSlot` latest-value-wins mailbox** (`base_station.hpp/.cpp`, added ota136): one slot per RTCM message *type* (message number = top 12 bits of the payload, extracted in `rtcm_message_number()`), each slot carrying a per-destination `sent_mask` bit. New data of a type overwrites the slot and clears every bit — a fresh version always supersedes whatever was pending, and a slow/reconnecting destination gets the *current* value of every type on its next flush instead of whatever happened to be batched when it reconnects. 16 slots (`kMaxCorrectionSlots`), only 8 actually used: 1005 (station coords, `ONTIME 5`), 1077/1087/1097/1117/1127/1137 (MSM7 GPS/GLONASS/Galileo/QZSS/BeiDou/NavIC, `ONTIME 1`), 1230 (GLONASS code-phase biases, `ONTIME 30` — static calibration data, not worth 1Hz bandwidth).
+- Both paths share the same **stagger cadence**: `kRtcmStaggerUs = kRtcmBatchUs/4` (50ms), phase offsets 0/50/100/150ms across local/rtk2go/onocoy/rtkdata so the 4 destinations' flushes don't all hit the shared SDIO/WiFi lane at the same instant.
+- Each destination flush hands frames to `NtripPushClient::push()` (`ntrip_push.cpp`), which enqueues into that client's own 8-deep FreeRTOS queue (`kQueueDepth`, `kMaxPacket=1200`) — a *separate* bounded buffer between "correction ready" and "bytes on the socket," drained by the client's own send task.
 
-## Root cause of push errors (fixed 2026-06-12)
-**The bug:** on queue-full, `push()` did `++dropped_batches_; reconnect_ = true;` — forcing a full TCP reconnect to the caster. The queue fills easily because the worker's `send_all()` can block up to ~5 s on a stalled TCP window while the producer keeps enqueuing every 200 ms (12 slots fill in ~2.4 s). So a brief network hiccup escalated into a disconnect, and **frequent reconnects are exactly what RTK2go/Onocoy rate-limit and ban** → "rejected" errors and churn.
+## Why the mailbox replaced the old per-destination batch+queue (ota136)
+The old model (still used for local_caster) batched frames chronologically with no message-type awareness — a stall could leave a FIFO full of stale duplicate MSM frames while a rare-but-critical 1005 got evicted purely by bad timing. More concretely: a destination reconnecting after any gap had to wait for the *next* natural batch window to get every message type again — for 1005 (every 5s) or 1230 (every 30s) that could mean several seconds of MSM corrections flowing with stale/missing reference coordinates right after every reconnect. The mailbox guarantees a freshly-reconnected destination gets the current value of every type on its very next tick.
 
-**The fix:** on queue-full, drop the OLDEST batch and enqueue the newest (keep freshest corrections), increment `dropped_batches_`, and **do NOT** set `reconnect_`. Genuine socket wedge is still recovered via `send_all()` returning false → `close_socket()` → reconnect in `run()`.
+## Bug: push() silently dropping data while "marking it sent" (ota137, 2026-07-06)
+**Introduced by the ota136 mailbox change, found the next day via a real symptom: Onocoy's self-reported stream latency climbed from 0.5s to 6.75s.**
+`NtripPushClient::push()` returned `void` and no-op'd whenever the client was disconnected/suspended (`!connected_`) — but the mailbox's flush loop marked a slot `sent_mask |= bit` the instant it *called* `push()`, with no way to know the data was actually accepted. During any disconnect/backoff window, every correction update got falsely marked "delivered" and discarded — the destination wouldn't get real data again until the *next* unrelated receiver update overwrote that slot. Compounds badly during frequent reconnects (a real ~38 min / ~56-cycle storm was in progress when this was found).
+**Fix:** `push()` now returns `bool` (true only if actually enqueued); the flush loop only sets `sent_mask` on `true`. A slot that couldn't be delivered stays pending and retries next tick.
+**Rule:** any future change to the delivery path must preserve "only mark delivered on confirmed hand-off," not "mark delivered on attempt."
 
-**Why:** RTCM corrections are superseded every second, so dropping a stale batch is harmless; tearing down the caster connection is not.
+## Reconnect/backoff logic (`ntrip_push.cpp`, stable since ota133)
+- Exponential backoff: `kBaseRetryMs=10000` doubling up to `kMaxRetryMs=120000` over the first 4 failures, plus jitter.
+- **Long-form backoff:** after `kLongBackoffThreshold=8` consecutive failures, jump to `kLongBackoffMs=600000` (10 min) + up to `kLongBackoffJitterMs=120000` jitter — stops hammering a caster during a real sustained outage.
+- `failures` only resets after a `kHealthyStreakUs=5000000` (5s) sustained streak of actual successful data flow, **not** on TCP-handshake success alone (an earlier bug — resetting too early was the reconnect-storm amplifier that caused repeated RTK2go bans in late June/early July).
+- DNS re-resolution (`cached_addr_valid_=false`) fires exactly once at `failures==3`, not `>=3` — the `>=` version was redundantly re-resolving (blocking `getaddrinfo()`, which holds the lwIP mutex and stalls HTTPS) on every failure past 3, not just the first.
+- `kMaxSendStallSeconds=8`: calibrated against measured RTT (RTK2go/Onocoy/RTKdata ~100-300ms typical, with jitter) — 25-80x headroom. **Do not shorten** — a shorter timeout increases reconnect frequency, working against the whole backoff strategy. Evaluated and rejected 2026-07-02.
+- Heap-leak fix (ota131): unresponsive-peer sockets must close via **abortive** `SO_LINGER{1,0}`, not graceful `shutdown()+close()` — graceful close left the PCB + unacked send buffer lingering on "socket write stalled" disconnects, collapsing heap from 200KB to single-digit KB in under 4 minutes during repeated reconnects.
 
-## Diagnostics added (NtripStatus)
-- `reconnects` (live-connection drops), `last_error` (sticky reject reason, not overwritten by "connecting"), `connected_sec` (current connection uptime), `last_send_age_sec` + `ever_sent` (data freshness). Surfaced on `/status` JSON, the status page service rows, and the new `/logs` page.
+## net_health (`main/net_health.hpp/.cpp`, added ota135)
+Periodic (~20s) raw-IP TCP-connect probe to `8.8.8.8:53`, independent of WiFi association. `BaseStation::network_available_` only reflects AP association — during the 2026-07-03 storm that stayed `true` the whole time the WAN uplink itself was down, giving no way to tell "internet is down" from "our code is broken" without after-the-fact log forensics. Exposed as `internet_up`/`internet_since_change_sec`/`internet_checked_sec_ago` in `/status`, logged on every transition.
+**Known limitation (found 2026-07-05):** this is a binary reachability check, not a quality/loss measure. During a real ~38-minute high-packet-loss episode where all 3 casters cycled every 10-45s, net_health only registered one 45s "down" blip — a quick low-volume probe kept succeeding through most of it even though long-lived, continuously-ACKed NTRIP streams could not survive. It reliably catches full outages; it under-detects "degraded but technically reachable," which is the more common real-world failure mode here.
 
-## How to apply
-- If push churn returns: check `/logs` and the status page reconnect counter + last_error. High reconnects with low dropped = network/caster issue; high dropped = producer outpacing sender (consider larger queue depth `kQueueDepth`).
-- Never reintroduce a reconnect-on-drop. Dropping batches is the correct backpressure for RTCM.
+## Onocoy is measurably stricter than RTK2go/RTKdata
+Onocoy's own dashboard cites explicit rejection reasons — "Latency of incoming RTCM3 stream exceeds maximum allowed latency" and occasionally "RTCM Data received, but lack usable measurements" — that RTK2go/RTKdata never show (theirs are consistently our own stall-timeout or an occasional TCP reset). Onocoy enforces a latency ceiling the other two don't, so it disconnects faster under identical shared-network conditions. This is why Onocoy's incident counts/dashboard "offline %" look disproportionately worse even when the root cause (shared WAN congestion) hits all three similarly — check RTK2go/RTKdata's counts in the same window before concluding an issue is Onocoy-specific.
+
+## Decisions made and NOT to be revisited without new evidence
+- **Don't increase RTCM send frequency to fight Onocoy's latency rejections.** The mechanism is network congestion/transit delay; sending more often adds more bytes to an already-strained path, plausibly worsening latency rather than helping. (2026-07-05)
+- **Don't switch destination flushing from time-based staggering to sequential/chained queuing.** Lets one bad caster block healthy ones. (2026-07-02)
+- **Don't shorten `kMaxSendStallSeconds`.** See above.
+
+## Diagnostics
+- `/status` JSON: per-caster `reconnects`, `last_error` (sticky), `connected_sec`, `last_send_age_sec`/`ever_sent`, plus `internet_up`/`internet_since_change_sec` from net_health.
+- **When investigating reconnect frequency, always pull full-window counts, not `grep | tail -N`** — tail truncation hid a 38-minute/56-cycle storm during this session's soak monitoring and produced a falsely-clean status report. Use a timestamp-bounded `awk` filter over the full log instead.
+- High reconnects + low `dropped_batches` = network/caster issue. High `dropped_batches` = producer outpacing the 8-deep send queue (rare; the mailbox model already prevents most of this by construction).

@@ -25,6 +25,7 @@ metadata:
 - `main/app_config.hpp` — compile-time constants: NTRIP hosts, AP SSID + default password, RTCM rates, survey params
 - `main/sd_manager.hpp/.cpp` — SD card via SDSPI; RINEX and raw data directories
 - `main/ntrip_push.hpp/.cpp` — pushes RTCM3 to RTK2go, Onocoy, RTKdata
+- `main/net_health.hpp/.cpp` — periodic TCP-connect probe (8.8.8.8:53) for WAN reachability independent of WiFi association; see [[project_ntrip]]
 - `main/local_caster.hpp/.cpp` — local NTRIP caster on port 2101 (up to 4 clients)
 - `main/survey.hpp/.cpp` — UM980 CONFIG BASE TIME survey parser
 - `main/um980.hpp/.cpp` — UM980 UART command/response driver
