@@ -77,6 +77,19 @@ esp_err_t Um980::configure_raw_output() {
     return ESP_OK;
 }
 
+esp_err_t Um980::configure_signal_group() {
+    // Per the Unicore N4 reference manual (SIGNALGROUP, section 4.23): the
+    // module resets automatically when this value actually changes, and the
+    // new value is saved automatically (no SAVECONFIG needed). Re-issuing
+    // the same value on a later call is a no-op -- no reset, no delay cost.
+    // Give it generous settling time before the caller sends anything else;
+    // the manual doesn't state a reboot duration, so this errs long.
+    ESP_RETURN_ON_ERROR(
+        command("CONFIG SIGNALGROUP 2"), kTag, "SIGNALGROUP failed");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    return ESP_OK;
+}
+
 esp_err_t Um980::configure_base(double lat, double lon, double height) {
     ESP_RETURN_ON_ERROR(stop_output(), kTag, "Output reset failed");
     ESP_RETURN_ON_ERROR(

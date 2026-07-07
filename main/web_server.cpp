@@ -484,9 +484,10 @@ esp_err_t AdminWebServer::start(
 
     httpd_ssl_config_t tls_config = HTTPD_SSL_CONFIG_DEFAULT();
     // Raised from 32: the secure handler table grew past 30 with the bulk-delete
-    // routes (/files/preview, /files/delete-batch, /files/delete-status). 40 gives
-    // headroom for future routes without re-tuning.
-    tls_config.httpd.max_uri_handlers = 40;
+    // routes (/files/preview, /files/delete-batch, /files/delete-status). Raised
+    // again from 40 (the table hit that exactly with /um980/reset) to 44 for
+    // headroom without re-tuning again immediately.
+    tls_config.httpd.max_uri_handlers = 44;
     tls_config.httpd.stack_size = 12288;
     tls_config.httpd.recv_wait_timeout = 5;
     tls_config.httpd.send_wait_timeout = kWebSendTimeoutSec;
@@ -572,6 +573,7 @@ esp_err_t AdminWebServer::register_secure_handlers() {
         {"/update", HTTP_POST, update_upload_handler, this},
         {"/config/position", HTTP_POST, position_handler, this},
         {"/survey", HTTP_POST, survey_handler, this},
+        {"/um980/reset", HTTP_POST, um980_reset_handler, this},
         {"/config/wifi", HTTP_POST, wifi_handler, this},
         {"/config/ap", HTTP_POST, ap_password_handler, this},
         {"/config/antenna", HTTP_POST, antenna_handler, this},
@@ -1156,6 +1158,17 @@ esp_err_t AdminWebServer::system_page_handler(httpd_req_t *request) {
         "<p><input name='ap_pw' type='password' minlength='8' maxlength='63' "
         "placeholder='New hotspot password (8-63 chars)' required></p>"
         "<button>Save Hotspot Password</button></form></div>"
+        "<div class='sec'><h2>GNSS Receiver</h2>"
+        "<form method='post' action='/um980/reset' "
+        "onsubmit=\"return confirm('This resets the UM980 signal-group "
+        "configuration and briefly reboots the receiver. Outbound NTRIP "
+        "streams will suspend for a few seconds while it recovers. Continue?');\">"
+        "<p class='dim'>Applies the SIGNALGROUP 2 tracking configuration "
+        "(adds GLONASS G3, Galileo E6, and NavIC L5 tracking beyond the "
+        "receiver's factory default). Only needed once, or after a firmware "
+        "update changes this setting; the receiver reboots briefly and RTCM "
+        "output resumes automatically. Requires Base TX mode.</p>"
+        "<button>Reset UM980 Signal Group</button></form></div>"
         "<div class='sec'><h2>Firmware &amp; Tools</h2>"
         "<p><a href='/update'>Firmware Update (OTA)</a></p>"
         "<p><a href='/logs'>Console Logs</a></p>"
@@ -1654,6 +1667,16 @@ esp_err_t AdminWebServer::survey_handler(httpd_req_t *request) {
         server->station_->request_survey(), kTag, "Survey request failed");
     httpd_resp_set_status(request, "303 See Other");
     httpd_resp_set_hdr(request, "Location", "/position");
+    return httpd_resp_send(request, nullptr, 0);
+}
+
+esp_err_t AdminWebServer::um980_reset_handler(httpd_req_t *request) {
+    AdminWebServer *server = self(request);
+    if (!server->authorize(request)) return server->send_unauthorized(request);
+    ESP_RETURN_ON_ERROR(
+        server->station_->request_um980_reset(), kTag, "UM980 reset request failed");
+    httpd_resp_set_status(request, "303 See Other");
+    httpd_resp_set_hdr(request, "Location", "/system");
     return httpd_resp_send(request, nullptr, 0);
 }
 

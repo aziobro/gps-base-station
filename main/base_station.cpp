@@ -107,6 +107,13 @@ esp_err_t BaseStation::request_survey() {
         ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+esp_err_t BaseStation::request_um980_reset() {
+    if (!actions_) return ESP_ERR_INVALID_STATE;
+    const Action action{ActionType::kResetUm980, 0, 0, 0};
+    return xQueueSend(actions_, &action, 0) == pdTRUE
+        ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
 esp_err_t BaseStation::request_raw_collection(bool enable) {
     if (!actions_) return ESP_ERR_INVALID_STATE;
     // Persist the user's intent so collection resumes after a reboot.
@@ -281,6 +288,10 @@ void BaseStation::handle_action(const Action &action) {
         exit_raw_collection();
         return;
     }
+    if (action.type == ActionType::kResetUm980) {
+        reset_um980();
+        return;
+    }
     if (raw_collection_) exit_raw_collection();
     if (storage_.save_position(
             action.lat, action.lon, action.height) != ESP_OK) {
@@ -356,6 +367,31 @@ void BaseStation::exit_raw_collection() {
         receiver_.configure_base(pos.lat, pos.lon, pos.height));
     apply_stream_state();
     ESP_LOGI(kTag, "Raw collection mode exited, RTCM restored");
+}
+
+void BaseStation::reset_um980() {
+    if (mode_ != BaseMode::kTransmit || raw_collection_) {
+        ESP_LOGW(kTag, "UM980 signal-group reset requires Base TX mode (not raw collection)");
+        return;
+    }
+    // configure_signal_group() reboots the receiver if the value is changing,
+    // so suspend outbound/local streams for the duration up front -- the
+    // same has_rtcm_data_/outbound_rate_ready_ gate that protects a normal
+    // survey->transmit transition protects this too, so casters won't see
+    // an empty connection while the receiver is mid-reboot.
+    has_rtcm_data_ = false;
+    outbound_rate_ready_ = false;
+    apply_stream_state();
+    ESP_LOGI(kTag, "UM980 signal-group reset requested; outbound streams suspended");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_signal_group());
+    const BasePosition pos = storage_.load_position();
+    uart_flush_input(data_uart_);
+    reset_rtcm_parser();
+    reset_rtcm_state();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        receiver_.configure_base(pos.lat, pos.lon, pos.height));
+    apply_stream_state();
+    ESP_LOGI(kTag, "UM980 signal-group reset complete; base configuration reapplied");
 }
 
 bool BaseStation::effective_streams_suspended() const {

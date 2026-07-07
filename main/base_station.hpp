@@ -45,6 +45,11 @@ public:
     esp_err_t request_survey();
     esp_err_t request_position(double lat, double lon, double height);
     esp_err_t request_raw_collection(bool enable);
+    // User-triggered UM980 signal-group reset (see um980.hpp). Only takes
+    // effect in Base TX mode; requires the receiver to briefly reboot, so
+    // outbound streams are suspended for the duration and resume once
+    // configure_base() reapplies RTCM output and the rate gate clears.
+    esp_err_t request_um980_reset();
     // Re-arm RINEX collection on boot if it was enabled before the last reboot.
     void resume_persisted_rinex();
     void reload_services();
@@ -71,6 +76,7 @@ private:
         kPosition,
         kStartRaw,
         kStopRaw,
+        kResetUm980,
     };
     struct Action {
         ActionType type;
@@ -174,6 +180,7 @@ private:
     void enter_transmit(double lat, double lon, double height);
     void enter_raw_collection();
     void exit_raw_collection();
+    void reset_um980();
     bool effective_streams_suspended() const;
     bool effective_outbound_streams_suspended() const;
     void apply_stream_state();
