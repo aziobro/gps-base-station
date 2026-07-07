@@ -116,8 +116,16 @@ esp_err_t Um980::configure_base(
                      antenna_model.c_str()),
             kTag, "Base antenna model config failed");
     }
+    // MODE BASE (not CONFIG BASE GEODETIC) is the documented command for a
+    // fixed base station -- confirmed via full-text search of the Unicore
+    // N4 reference manual, "CONFIG BASE GEODETIC" does not appear anywhere
+    // in it. Geodetic vs. ECEF is disambiguated automatically by the value
+    // ranges (lat/lon in range -> geodetic), no keyword needed. The prior
+    // command empirically worked (RTCM broadcast the exact requested
+    // position throughout), but this switches to the documented one for
+    // long-term reliability rather than depending on undocumented behavior.
     ESP_RETURN_ON_ERROR(
-        commandf("CONFIG BASE GEODETIC %.8f %.8f %.4f", lat, lon, height),
+        commandf("MODE BASE %.8f %.8f %.4f", lat, lon, height),
         kTag, "Base position failed");
     ESP_RETURN_ON_ERROR(
         commandf("LOG COM3 RTCM1006 ONTIME %d",
