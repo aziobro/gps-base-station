@@ -4,6 +4,7 @@
 - [project_hardware](project_hardware.md) — ESP32-P4-WIFI6-Touch-LCD-4B, UM980, wiring
 - [project_structure](project_structure.md) — IDF file layout, key modules
 - [project_display](project_display.md) — Display/touch implementation decisions
+- [project_um980_config](project_um980_config.md) — UM980 base-station config commands, Unicore manual findings (MODE BASE vs CONFIG BASE GEODETIC, SIGNALGROUP, PVTALG, RTCM1006/1033), gotchas
 
 ## Build & Deploy
 - [project_build_deploy](project_build_deploy.md) — build (./idf.sh · Windows idf.ps1), OTA/USB flash, release.sh · release.ps1, bootstrap recovery, config.env, git push
