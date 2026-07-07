@@ -325,7 +325,8 @@ void BaseStation::enter_transmit(double lat, double lon, double height) {
     uart_flush_input(data_uart_);
     reset_rtcm_parser();
     reset_rtcm_state();
-    ESP_ERROR_CHECK_WITHOUT_ABORT(receiver_.configure_base(lat, lon, height));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        receiver_.configure_base(lat, lon, height, storage_.antenna_model()));
     apply_stream_state();
     ESP_LOGI(kTag, "Base transmission mode");
 }
@@ -364,7 +365,8 @@ void BaseStation::exit_raw_collection() {
     reset_rtcm_parser();
     reset_rtcm_state();
     ESP_ERROR_CHECK_WITHOUT_ABORT(
-        receiver_.configure_base(pos.lat, pos.lon, pos.height));
+        receiver_.configure_base(
+            pos.lat, pos.lon, pos.height, storage_.antenna_model()));
     apply_stream_state();
     ESP_LOGI(kTag, "Raw collection mode exited, RTCM restored");
 }
@@ -389,7 +391,8 @@ void BaseStation::reset_um980() {
     reset_rtcm_parser();
     reset_rtcm_state();
     ESP_ERROR_CHECK_WITHOUT_ABORT(
-        receiver_.configure_base(pos.lat, pos.lon, pos.height));
+        receiver_.configure_base(
+            pos.lat, pos.lon, pos.height, storage_.antenna_model()));
     apply_stream_state();
     ESP_LOGI(kTag, "UM980 signal-group reset complete; base configuration reapplied");
 }

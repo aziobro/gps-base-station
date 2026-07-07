@@ -90,15 +90,43 @@ esp_err_t Um980::configure_signal_group() {
     return ESP_OK;
 }
 
-esp_err_t Um980::configure_base(double lat, double lon, double height) {
+esp_err_t Um980::configure_base(
+    double lat, double lon, double height, const std::string &antenna_model) {
     ESP_RETURN_ON_ERROR(stop_output(), kTag, "Output reset failed");
+    // Per the Unicore N4 reference manual, UNDULATION should be configured
+    // before setting up base station mode. AUTO (the built-in geoid grid)
+    // matches the factory default -- sent explicitly so it's never left to
+    // whatever state a prior firmware/config left the receiver in.
+    ESP_RETURN_ON_ERROR(
+        command("CONFIG UNDULATION AUTO"), kTag, "Undulation config failed");
+    // Dual-frequency PVT solution. The manual explicitly recommends this
+    // (repeated 3x, verbatim) for a fixed/self-optimizing base station in
+    // an open-sky environment. UM980 defaults to AUTO (single-frequency
+    // solution with ionospheric error estimation), not MULTI.
+    ESP_RETURN_ON_ERROR(
+        command("CONFIG PVTALG MULTI"), kTag, "PVT algorithm config failed");
+    // Embeds the real antenna model into RTCM 1005/1006/1033's antenna
+    // descriptor field (default is the generic placeholder ADVNULLANTENNA).
+    // SN/setupID aren't tracked in storage; the manual's own documented
+    // defaults are purely informational fields, not used in any correction
+    // calculation, so a placeholder here is harmless.
+    if (!antenna_model.empty()) {
+        ESP_RETURN_ON_ERROR(
+            commandf("CONFIG BASEANTENNAMODEL \"%s\" a0001 0 USER",
+                     antenna_model.c_str()),
+            kTag, "Base antenna model config failed");
+    }
     ESP_RETURN_ON_ERROR(
         commandf("CONFIG BASE GEODETIC %.8f %.8f %.4f", lat, lon, height),
         kTag, "Base position failed");
     ESP_RETURN_ON_ERROR(
-        commandf("LOG COM3 RTCM1005 ONTIME %d",
+        commandf("LOG COM3 RTCM1006 ONTIME %d",
                  config::kRtcmBasePositionRateSec),
-        kTag, "RTCM1005 failed");
+        kTag, "RTCM1006 failed");
+    ESP_RETURN_ON_ERROR(
+        commandf("LOG COM3 RTCM1033 ONTIME %d",
+                 config::kRtcmAntennaDescriptorRateSec),
+        kTag, "RTCM1033 failed");
     ESP_RETURN_ON_ERROR(
         commandf("LOG COM3 RTCM1077 ONTIME %d", config::kRtcmGpsRateSec),
         kTag, "RTCM1077 failed");

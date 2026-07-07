@@ -12,7 +12,13 @@ inline constexpr uint32_t kSurveyBlockTimeSec = 60;
 inline constexpr int kSurveyMinBlocks = 5;
 inline constexpr float kSurveyMaxStabilityM = 0.50F;
 
+// Now feeds RTCM1006 (station position + antenna height), not RTCM1005 --
+// 1006 is a strict superset, matching Unicore's own recommended base-station
+// recipe (manual section 1.1) instead of the antenna-height-less variant.
 inline constexpr int kRtcmBasePositionRateSec = 5;
+// RTCM1033: receiver + antenna descriptor. Static metadata, doesn't need to
+// be frequent -- matches Unicore's own example rate (section 1.1).
+inline constexpr int kRtcmAntennaDescriptorRateSec = 10;
 inline constexpr int kRtcmGpsRateSec = 1;
 inline constexpr int kRtcmGlonassRateSec = 1;
 inline constexpr int kRtcmGalileoRateSec = 1;
