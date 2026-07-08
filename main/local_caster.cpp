@@ -87,7 +87,14 @@ void LocalCaster::push(const uint8_t *data, size_t length) {
     Packet packet{};
     packet.length = std::min(length, kMaxPacket);
     memcpy(packet.data, data, packet.length);
-    if (xQueueSend(queue_, &packet, 0) != pdTRUE) reset_clients_ = true;
+    // A full queue means this one packet is late, not that every connected
+    // client is unhealthy -- drop just this packet rather than forcing a
+    // reconnect storm on every LAN client (reset_clients_ used to be set
+    // here; that disconnected all clients on every transient overflow).
+    if (xQueueSend(queue_, &packet, 0) != pdTRUE) {
+        ESP_LOGW(kTag, "Broadcast queue full -- dropped one packet (%u bytes)",
+                 static_cast<unsigned>(packet.length));
+    }
 }
 
 int LocalCaster::client_count() const {

@@ -29,7 +29,15 @@ public:
 
 private:
     static constexpr size_t kMaxPacket = 1200;
-    static constexpr int kQueueDepth = 4;
+    // Must exceed BaseStation::RtcmBatch::kMaxFramesPerBatch (12) -- a single
+    // batch flush calls push() once per accumulated frame in a tight loop
+    // (base_station.cpp flush_batch_frames()), faster than run()'s ~20ms
+    // poll can drain. A queue at or below 12 periodically overflowed in
+    // real operation (roughly every 30s, when the 5s/10s/30s periodic RTCM
+    // messages all landed in the same 200ms batch window as the six 1Hz MSM7
+    // frames) -- found via rinex-recorder, a persistent local NTRIP client
+    // that made the resulting forced client disconnects visible (2026-07-08).
+    static constexpr int kQueueDepth = 16;
     struct Packet {
         uint16_t length;
         uint8_t data[kMaxPacket];
