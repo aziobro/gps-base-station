@@ -41,7 +41,18 @@ Confirmed via full-text search of the entire 365-page manual — `CONFIG BASE GE
 ## No response-checking on any UM980 command
 `Um980::command()` writes the ASCII command and waits a fixed 200ms — it does **not** read back or parse the receiver's response. Every command's "did it work" signal is empirical (does RTCM/BASEPOS reflect what was asked for), not a real ack. Keep this in mind before trusting a new command blindly — every UM980 change this session was verified by checking `/status` position and caster acceptance after deploy, not just "the command was sent without an ESP_RETURN_ON_ERROR failure" (that only catches UART write failures, not receiver-side rejection).
 
-## Considered and intentionally left unchanged
+## Firmware: running Build13504, newer Build17548 available (deferred, 2026-07-11)
+Current firmware confirmed via the RTCM1033-reported receiver version string ("13504-28051" in `REC # / TYPE / VERS`, visible in any rinex-recorder output -- there's no VERSIONA query wired up in our own code, `Um980::command()` doesn't read responses at all, see below). Checked Unicore's firmware distribution (mirrored at `github.com/sparkfun/SparkFun_RTK_Torch/UM980_Firmware`, the only accessible source found -- Unicore's own download-center page doesn't expose direct file listings): the newest build there is **Build17548** (release note dated the entry says Dec. 24 2024, filename says Oct 24 2024 -- minor inconsistency in Unicore's own doc, not ours to resolve), no newer build found as of this check.
+
+Read the actual Build17548 release notes (11 items) and filtered for relevance to a 24/7 fixed marine base station on SIGNALGROUP 2. Most don't apply (QZSS L6/MADOCA-PPP, SIGNALGROUP 8/10, UAV HIGHDYN, Korean SBAS, serial parity) -- but four stood out:
+1. **"Fixed the problem of no response with a certain probability when RTCM and NMEA commands were input together."** We send both every `configure_base()` call (RTCM on COM3, NMEA GSA/GSV on COM2) and never check the receiver's response (see "No response-checking" below) -- if this bug ever silently dropped one of our commands, we'd have no way of knowing. The single most relevant fix for us.
+2. Improved STANDALONE exit mechanism and long-term computation logic -- general reliability for exactly the kind of continuous, weeks-long unattended operation this is.
+3. Improved start-up time -- relevant given this session's whole RTK2go-ban saga was about slow-to-stabilize RTCM output after a mode transition (see [[project_ntrip]], `kMinOutboundRtcmBps` gate).
+4. New `ENVINFOA`/`ENVINFOB` (environmental info output) -- could feed a future `/status` addition (e.g. receiver temperature, useful on a boat).
+
+**Decision: deferred, not applied.** Updating means running Unicore's UPrecise tool (Windows GUI, `uprecise-v2-0.exe`) against the receiver directly -- not reachable through our web API or SSH, needs physical/USB access to the UM980's own config port. Revisit this if we ever hit a symptom that matches #1 (a config silently not taking effect) or #3 (startup instability recurs) -- those are the two most likely to actually explain a real future bug.
+
+## No response-checking on any UM980 command
 - **Elevation mask** (`MASK` command, default 5°) — standard, sensible default. Changing it trades sky-visibility (more low-elevation satellites tracked) against RMS/cycle-slip noise (low-elevation signals are noisier, more multipath-prone) — a real tradeoff, not a clear win in either direction, and no evidence it needs tuning.
 - **IONMODE** — default `GPSK8` is correct; BDS-3/Galileo ionospheric models aren't supported on this hardware yet.
 - **ALLEPHRTCM** — controls batching of RTCM ephemeris messages (1019/1020/1042 etc.), which we don't send at all. Moot unless we start broadcasting ephemeris RTCM types separately (a bigger, separate decision).
